@@ -52,7 +52,7 @@ var updateCmd = &cobra.Command{
 
 Downloads the release for this machine from GitHub, checks it is complete,
 and replaces the running binary in place. Your settings and model are
-untouched. A running daemon keeps the old version until it is restarted.`,
+untouched. A running daemon is restarted automatically onto the new version.`,
 	Args: cobra.NoArgs,
 	RunE: runUpdate,
 }
@@ -258,8 +258,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s updated %s → %s\n", ok("✓"), Version, rel.TagName)
 	if _, running := daemonRunning(); running {
-		fmt.Println(dim("  the running daemon is still the old version — Ctrl+C in its window, then flowlite"))
-		fmt.Println(dim("  (or flowlite settings → Background daemon → Restart)"))
+		fmt.Println(dim("  restarting FlowLite so it runs the new version…"))
+		if err := stopBackground(); err != nil {
+			return err
+		}
+		if err := startBackground(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
