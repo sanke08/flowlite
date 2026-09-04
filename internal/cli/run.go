@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
 	"github.com/sanke08/flowlite/internal/daemon"
@@ -21,6 +23,24 @@ import (
 	"github.com/sanke08/flowlite/internal/mainloop"
 	"github.com/sanke08/flowlite/internal/whisper"
 )
+
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Run FlowLite in the background, detached from this terminal",
+	Args:  cobra.NoArgs,
+	RunE:  func(cmd *cobra.Command, args []string) error { return startBackground() },
+}
+
+var stopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the background FlowLite daemon",
+	Args:  cobra.NoArgs,
+	RunE:  func(cmd *cobra.Command, args []string) error { return stopBackground() },
+}
+
+func init() {
+	rootCmd.AddCommand(startCmd, stopCmd)
+}
 
 // runDaemon is branch 5 of bare `flowlite`: load the model, install the
 // hotkey and listen until Ctrl+C. detached is the background mode spawned by
@@ -154,7 +174,7 @@ func startBackground() error {
 		if _, running := daemonRunning(); running {
 			spin.Stop()
 			fmt.Printf("%s running in the background (pid %d)\n", ok("✓"), c.Process.Pid)
-			fmt.Println(dim("  log: " + shortenHome(lp) + "    stop it any time: flowlite settings → Background daemon → Stop"))
+			fmt.Println(dim("  log: " + shortenHome(lp) + "    stop it any time: flowlite stop"))
 			return nil
 		}
 	}

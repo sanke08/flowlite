@@ -1,9 +1,11 @@
-// Package cli is the whole user interface. There are five commands:
+// Package cli is the whole user interface. There are seven commands:
 //
 //	flowlite            start dictating (runs setup the first time)
 //	flowlite settings   one menu for everything you can change
 //	flowlite doctor     check what FlowLite needs and how to fix it
 //	flowlite update     fetch the latest release
+//	flowlite start      run in the background, detached from this terminal
+//	flowlite stop       stop the background daemon
 //	flowlite uninstall  remove FlowLite completely
 package cli
 
@@ -133,6 +135,13 @@ func runRoot(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Println()
+		fmt.Println(dim("A few commands worth knowing:"))
+		fmt.Println("  " + blue("flowlite settings") + dim("   change model, key, microphone, language, sounds…"))
+		fmt.Println("  " + blue("flowlite doctor") + dim("     check what's needed and how to fix it"))
+		fmt.Println("  " + blue("flowlite update") + dim("     fetch the latest release"))
+		fmt.Println("  " + blue("flowlite start") + dim("      run in the background, detached from this terminal"))
+		fmt.Println("  " + blue("flowlite uninstall") + dim("  remove FlowLite completely"))
+		fmt.Println()
 	}
 
 	// 3. Keyboard permission missing: say exactly what to do and stop. A
@@ -147,7 +156,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// means two pastes per dictation.
 	if pid, running := daemonRunning(); running {
 		fmt.Printf("FlowLite is already listening (pid %d).\n", pid)
-		fmt.Println(dim("  stop it with Ctrl+C in that window, or:  flowlite settings → Background daemon → Stop"))
+		fmt.Println(dim("  stop it with Ctrl+C in that window, or:  flowlite stop"))
 		return nil
 	}
 
