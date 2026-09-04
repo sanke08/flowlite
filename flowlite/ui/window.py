@@ -3,7 +3,6 @@
 import sys
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -11,29 +10,18 @@ from PySide6.QtWidgets import (
 from .. import models, permissions
 from ..config import Settings
 from ..hotkey import key_label
+from . import theme
 from .icons import app_icon
 from .modelspage import ModelsPage
 from .prefspage import PrefsPage
 
-STYLE = """
-QWidget { font-size: 13px; }
-QLabel#dim { color: palette(mid); }
-QLabel#title { font-size: 19px; font-weight: 600; }
-QLabel#tag {
-    background: #2f6fed; color: white; border-radius: 7px;
-    padding: 1px 7px; font-size: 10px; font-weight: 600;
-}
-QFrame#modelRow { border: 1px solid palette(mid); border-radius: 9px; }
-QFrame#banner { border: 1px solid #d9a441; border-radius: 9px; background: rgba(217,164,65,0.12); }
-QFrame#ok     { border: 1px solid #3aa76d; border-radius: 9px; background: rgba(58,167,109,0.12); }
-"""
 
 
 class PermissionsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
         if not permissions.needs_accessibility():
@@ -125,8 +113,7 @@ class PermissionsPage(QWidget):
             if granted else
             "Accessibility is <b>not</b> granted yet — the dictation key will not work."
         )
-        self.status.style().unpolish(self.status)
-        self.status.style().polish(self.status)
+        self.status.setStyleSheet(theme.STYLESHEET)  # re-evaluate #ok / #banner
 
 
 class MainWindow(QWidget):
@@ -138,8 +125,8 @@ class MainWindow(QWidget):
         self.backend = backend
         self.setWindowTitle("FlowLite")
         self.setWindowIcon(app_icon())
-        self.resize(680, 620)
-        self.setStyleSheet(STYLE)
+        self.resize(720, 700)
+        self.setMinimumSize(620, 520)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
@@ -169,10 +156,9 @@ class MainWindow(QWidget):
         bottom = QHBoxLayout()
         bottom.addStretch(1)
         close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.setMinimumWidth(96)
         close.clicked.connect(self.hide)
-        f = QFont(close.font())
-        f.setWeight(QFont.Weight.DemiBold)
-        close.setFont(f)
         bottom.addWidget(close)
         root.addLayout(bottom)
 

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from .. import models
 from ..download import DownloadCancelled, delete_model, download_model
 from ..models import ModelInfo, human_size as _human
+from . import theme
 
 
 class DownloadWorker(QObject):
@@ -77,7 +78,7 @@ class ModelRow(QFrame):
         top.addWidget(self.size_label)
 
         self.action = QPushButton()
-        self.action.setFixedWidth(104)
+        self.action.setFixedWidth(112)
         self.action.clicked.connect(self._on_action)
         top.addWidget(self.action)
 
@@ -110,6 +111,9 @@ class ModelRow(QFrame):
     def refresh(self) -> None:
         have = self.info.downloaded(self.backend)
         self.radio.setEnabled(have)
+        # Highlight the row that is actually in use.
+        self.setObjectName("modelRowActive" if self.radio.isChecked() else "modelRow")
+        self.setStyleSheet(theme.STYLESHEET)
         self.delete_btn.setVisible(have and not self.downloading)
         if self.downloading:
             self.action.setText("Cancel")
@@ -117,16 +121,20 @@ class ModelRow(QFrame):
         elif have:
             self.action.setText("Downloaded")
             self.action.setEnabled(False)
+            self.action.setObjectName("")
             self.size_label.setText(_human(self.info.disk_bytes(self.backend)))
         else:
             self.action.setText("Download")
             self.action.setEnabled(True)
+            self.action.setObjectName("primary")
             self.size_label.setText(_human(self.info.size_bytes(self.backend)))
 
     def set_checked(self, on: bool) -> None:
         self.radio.blockSignals(True)
         self.radio.setChecked(on)
         self.radio.blockSignals(False)
+        self.setObjectName("modelRowActive" if on else "modelRow")
+        self.setStyleSheet(theme.STYLESHEET)
 
     # -- actions ------------------------------------------------------------
 
@@ -211,7 +219,7 @@ class ModelsPage(QWidget):
         super().__init__(parent)
         self.backend = backend
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
         intro = QLabel(

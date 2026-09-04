@@ -11,6 +11,7 @@ from . import APP_NAME, backends, models, permissions
 from .config import Settings
 from .controller import Controller, State
 from .paths import config_dir
+from .ui import theme
 from .ui.icons import app_icon
 from .ui.overlay import Overlay
 from .ui.tray import Tray
@@ -72,8 +73,23 @@ class App:
             self.window.open_at(0)
         elif permissions.needs_accessibility() and not permissions.has_accessibility():
             self.window.open_at(2)
+        else:
+            # FlowLite has no Dock icon, so a silent launch looks like nothing
+            # happened. Say once, per launch, where it actually went.
+            self._announce()
 
     # -- wiring -------------------------------------------------------------
+
+    def _announce(self) -> None:
+        if not self.tray.supportsMessages():
+            return
+        where = "menu bar" if sys.platform == "darwin" else "system tray"
+        self.tray.showMessage(
+            APP_NAME,
+            f"Running in your {where}. Click the microphone icon there to "
+            f"change settings or quit.",
+            app_icon(), 5000,
+        )
 
     def _model_usable(self) -> bool:
         info = models.get(self.settings.model)
@@ -119,6 +135,8 @@ def main() -> int:
 
     qapp = QApplication(sys.argv)
     qapp.setApplicationName(APP_NAME)
+    # Before any widget is constructed, so nothing renders in system colours.
+    theme.apply(qapp)
     qapp.setWindowIcon(app_icon())
     # The tray is the app's real home; closing the settings window must not exit.
     qapp.setQuitOnLastWindowClosed(False)

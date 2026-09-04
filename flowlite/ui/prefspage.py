@@ -37,7 +37,7 @@ class PrefsPage(QWidget):
         self.settings = settings
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
         form = QFormLayout()

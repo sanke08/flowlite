@@ -39,10 +39,22 @@ def _mic_pixmap(color: QColor, filled: bool = True) -> QPixmap:
 
 
 def tray_icon(active: bool = False) -> QIcon:
-    """Monochrome on macOS so the menu bar tints it for light/dark."""
+    """Menu-bar icon.
+
+    Several sizes are supplied rather than one large pixmap: the macOS menu
+    bar renders at roughly 22pt, and downscaling a single 64px drawing there
+    smears the thin cradle arc into mush.
+    """
     color = QColor(255, 92, 92) if active else QColor(0, 0, 0)
-    icon = QIcon(_mic_pixmap(color))
+    icon = QIcon()
+    for size in (16, 22, 32, 44, 64):
+        icon.addPixmap(_mic_pixmap(color).scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
     if not active:
+        # Lets macOS tint it for light and dark menu bars.
         icon.setIsMask(True)
     return icon
 

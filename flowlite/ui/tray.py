@@ -23,9 +23,11 @@ class Tray(QSystemTrayIcon):
         menu.addAction(self.status_action)
         menu.addSeparator()
 
-        settings = QAction("Settings…")
+        settings = QAction("Open FlowLite Settings…")
         settings.triggered.connect(self.openSettings.emit)
         menu.addAction(settings)
+        # Make the primary action obvious when the menu is opened by a click.
+        menu.setDefaultAction(settings)
 
         menu.addSeparator()
         quit_action = QAction("Quit FlowLite")
