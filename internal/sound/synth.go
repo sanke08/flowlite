@@ -366,7 +366,7 @@ var designs = [6]design{
 		voices: []note{
 			{freq: 900, at: 0, dur: 0.021, amp: 1, partials: tick, attack: 0.0009, release: 0.003},
 		},
-		master: master{cutoff: 4800, drive: 0, peak: 0.05},
+		master: master{cutoff: 4800, drive: 0, peak: 0.18},
 	},
 	// Done — the sparkle (A5 → D6, chime timbre, shimmering detuned third
 	// partial) stays, but now sits on the same low boom + sustained pad
