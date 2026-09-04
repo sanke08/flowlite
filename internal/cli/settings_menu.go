@@ -85,8 +85,8 @@ func runSettingsMenu(cmd *cobra.Command, args []string) error {
 	fmt.Println(dim("  FlowLite " + Version + " · " + shortenHome(dir) + " · ↑/↓ move · Enter choose · Esc back"))
 	fmt.Println()
 
-	// changed is set by rows the running daemon cannot pick up live (it
-	// reads its settings once, at start). One hint at the end, not per row.
+	// changed is set by rows the daemon cannot pick up live (it reads its
+	// settings once, at start). One restart at the end, not per row.
 	changed := false
 	for {
 		var pick menuItem
@@ -121,7 +121,15 @@ func runSettingsMenu(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 	if changed {
-		restartHint()
+		if _, running := daemonRunning(); running {
+			fmt.Println(dim("Applying changes — restarting FlowLite…"))
+			if err := stopBackground(); err != nil {
+				return err
+			}
+			if err := startBackground(); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -626,15 +634,6 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-// restartHint is printed once when the menu closes with unapplied changes
-// and a daemon is running.
-func restartHint() {
-	if _, running := daemonRunning(); running {
-		fmt.Println(dim("  the running daemon keeps its old settings until you restart it:"))
-		fmt.Println(dim("  Ctrl+C in its window, then flowlite — or flowlite settings → Background daemon → Restart"))
-	}
 }
 
 func init() {
