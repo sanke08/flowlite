@@ -43,7 +43,12 @@ func NewPlayer(enabled bool) (*Player, error) {
 	cfg.Playback.Format = malgo.FormatF32
 	cfg.Playback.Channels = 1
 	cfg.SampleRate = Rate
-	cfg.PeriodSizeInMilliseconds = 10
+	// 10ms left the callback too little slack: whisper.cpp can spin up to 8
+	// CPU threads during transcription (see whisper.DefaultThreads), and
+	// under that load the audio thread can miss its deadline and audibly
+	// underrun — heard as stuttering right when Working is ticking. 25ms
+	// trades a little latency for headroom against that contention.
+	cfg.PeriodSizeInMilliseconds = 25
 	cfg.Alsa.NoMMap = 1
 
 	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{Data: p.mix})
