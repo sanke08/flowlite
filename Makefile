@@ -5,7 +5,16 @@
 
 BINARY   := flowlite
 MODULE   := github.com/sanke08/flowlite
-VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The VERSION file is the single source of truth. A build from a commit that
+# is not tagged exactly v$(VERSION) is marked -dev+<sha> so it can never be
+# mistaken for the release.
+BASEVER   := v$(shell cat VERSION)
+EXACTTAG  := $(shell git describe --tags --exact-match 2>/dev/null)
+ifeq ($(EXACTTAG),$(BASEVER))
+VERSION   := $(BASEVER)
+else
+VERSION   := $(BASEVER)-dev+$(shell git rev-parse --short HEAD 2>/dev/null || echo local)
+endif
 COMMIT    := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILDDATE := $(shell date -u +%Y-%m-%dT%H:%MZ)
 WHISPERV  ?= homebrew
@@ -36,7 +45,7 @@ test:            ## Unit tests (pure Go; no mic, model or permissions needed)
 install: release ## Install the self-contained binary to $(PREFIX)/bin
 	install -d $(PREFIX)/bin
 	install -m 0755 $(RELEASE) $(PREFIX)/bin/$(BINARY)
-	@echo "installed $(PREFIX)/bin/$(BINARY) — run: flowlite setup"
+	@echo "installed $(PREFIX)/bin/$(BINARY) — run: flowlite"
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)
@@ -109,7 +118,7 @@ release: whisper-static   ## One shareable file: dist/flowlite-<version>-macos-a
 # ---- publish -----------------------------------------------------------------
 # Cut a release: bump CHANGELOG.md, commit, `git tag -a vX.Y.Z`, then:
 publish: release windows   ## Upload the tagged build to GitHub Releases
-	@git describe --tags --exact-match >/dev/null 2>&1 || { echo "HEAD is not tagged. Tag first: git tag -a vX.Y.Z -m '...'"; exit 1; }
+	@test "$(EXACTTAG)" = "$(BASEVER)" || { echo "HEAD is not tagged $(BASEVER). Commit, then: git tag -a $(BASEVER) -m '...'"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "working tree is dirty; commit first"; exit 1; }
 	git push origin main $(VERSION)
 	gh release create $(VERSION) $(RELEASE) dist/$(BINARY)-$(VERSION)-windows-x64.zip \

@@ -60,16 +60,34 @@ progress "$FINAL" "$TOTAL"
 printf '\n' >&2
 chmod +x "$TMP"
 
-"$TMP" install
+# Put the binary where the terminal will find it: Homebrew's bin (already on
+# PATH and user-writable on Apple Silicon), /usr/local/bin if we may write
+# there, else ~/.local/bin.
+DIR=""
+for d in /opt/homebrew/bin /usr/local/bin; do
+  if [ -d "$d" ] && [ -w "$d" ]; then DIR="$d"; break; fi
+done
+if [ -z "$DIR" ]; then
+  DIR="$HOME/.local/bin"
+  mkdir -p "$DIR"
+fi
+install -m 0755 "$TMP" "$DIR/flowlite"
+xattr -d com.apple.quarantine "$DIR/flowlite" 2>/dev/null || true
 rm -f "$TMP"
+echo "FlowLite: installed $DIR/flowlite"
+case ":$PATH:" in
+  *":$DIR:"*) ;;
+  *) echo "FlowLite: $DIR is not on your PATH. Add this line to ~/.zshrc, then open a new terminal:"
+     echo "  export PATH=\"$DIR:\$PATH\"" ;;
+esac
 
 echo
 # When piped through `sh`, stdin is the script itself, not the keyboard; the
-# interactive wizard needs the real terminal. FLOWLITE_NO_SETUP=1 skips it.
+# setup wizard needs the real terminal. FLOWLITE_NO_SETUP=1 skips it.
 if [ -n "${FLOWLITE_NO_SETUP:-}" ]; then
-  echo "Installed. Next:  flowlite setup"
-elif command -v flowlite >/dev/null 2>&1 && [ -r /dev/tty ]; then
-  exec flowlite setup < /dev/tty
+  echo "Installed. Next:  flowlite"
+elif [ -x "$DIR/flowlite" ] && [ -r /dev/tty ]; then
+  exec "$DIR/flowlite" < /dev/tty
 else
-  echo "Open a new terminal and run:  flowlite setup"
+  echo "Next:  flowlite"
 fi

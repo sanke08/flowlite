@@ -15,6 +15,15 @@ and no audio is ever uploaded anywhere.
 > **Platforms:** macOS on Apple Silicon (M1 or newer) is supported and tested.
 > A Windows build exists but has not been tested yet — see [Windows](#windows-experimental).
 
+There are only four commands to know:
+
+| command | what it does |
+| --- | --- |
+| `flowlite` | start dictating (the first time, it sets itself up) |
+| `flowlite settings` | everything you can change, in one menu |
+| `flowlite doctor` | check what FlowLite needs and how to fix what is missing |
+| `flowlite update` | get the latest version |
+
 ---
 
 ## Before you start
@@ -40,8 +49,9 @@ curl -fsSL https://raw.githubusercontent.com/sanke08/flowlite/main/install.sh | 
 ```
 
 What it does: downloads a single 12 MB program, puts it where your terminal
-can find it, and starts the setup wizard. If you'd rather see the file first,
-it is here: <https://github.com/sanke08/flowlite/releases/latest>.
+can find it, and starts `flowlite`, which runs the setup wizard. If you'd
+rather see the file first, it is here:
+<https://github.com/sanke08/flowlite/releases/latest>.
 
 <details>
 <summary>Downloaded the file by hand instead of using the line above?</summary>
@@ -55,15 +65,17 @@ xattr -d com.apple.quarantine ~/Downloads/flowlite-*-macos-arm64
 ~/Downloads/flowlite-*-macos-arm64
 ```
 
-The `curl` line never has this problem, which is why it is the recommended way.
+It will offer to copy itself onto your PATH so plain `flowlite` works from then
+on. The `curl` line never has the quarantine problem, which is why it is the
+recommended way.
 </details>
 
 ---
 
 ## Step 2 — The setup wizard
 
-The wizard starts on its own after install (or run `flowlite setup` any time).
-It asks four things:
+The wizard starts on its own after install — it is what `flowlite` does when
+it has no model yet. It asks three things:
 
 **1. "Open the macOS Accessibility prompt now?"** — choose **Yes**.
 macOS opens a small dialog. Click **Open System Settings**. In the list that
@@ -72,15 +84,15 @@ step people skip, and without it nothing works.
 
 **2. "Speech model"** — press **Enter** to take the recommended one
 (*Large v3 Turbo, compressed*, 547 MB). It downloads now; you'll see a progress
-bar. If your connection drops, run `flowlite setup` again and it resumes.
+bar. If your connection drops, run `flowlite` again and it resumes.
 
 **3. "Dictation key"** — press **Enter** for **Right Option** (the `⌥` key to
 the right of your space bar). It does nothing on its own in macOS, which is
 exactly why it makes a good dictation key. You can change it later.
 
-**4. "Install flowlite so it works from any terminal?"** — **Yes**.
-
-When it finishes you'll see `✓ saved` and what to do next.
+When it finishes you'll see `✓ saved`. If the keyboard permission is not
+granted yet, FlowLite then prints the exact steps to grant it and stops —
+that is Step 3.
 
 ---
 
@@ -96,6 +108,9 @@ switch is **on**:
 
 > **System Settings → Privacy & Security → Accessibility → Terminal → on**
 
+Then **quit and reopen Terminal** — macOS only re-checks the permission when
+the app starts.
+
 Two details worth knowing:
 
 - The permission is granted to **Terminal** (the app you ran FlowLite from),
@@ -110,83 +125,111 @@ Check it worked:
 flowlite doctor
 ```
 
-Every line should show ✓. If the last line says the keyboard is blocked, it
-tells you the exact fix.
+Every line should show ✓. If the keyboard line says it is blocked, it tells
+you the exact fix.
 
 ---
 
 ## Step 4 — Your first dictation
 
 ```bash
-flowlite run
+flowlite
+```
+
+You'll see a banner like
+
+```
+FlowLite v0.4.0 is listening.   Large v3 Turbo (compressed) · Right Option · Metal
+  hold Right Option to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels · Ctrl+C quits
+  settings: flowlite settings (in another tab)
 ```
 
 Leave that running. Now click into any text field — a Notes window is a good
 first try — and:
 
 1. **Press and hold Right Option.** You hear a short rising tone and a small
-   dark pill appears at the bottom of the screen with a waveform. Speak.
-2. **Release.** A falling tone; the waveform turns into a spinner and ticks
-   quietly while the model works (about 1.5 s).
-3. Your words appear at the cursor. A bright tick, the spinner becomes a ✓,
-   the pill fades away.
+   black pill appears near the bottom of the screen with a waveform. Speak.
+2. **Release.** A falling tone; the bars settle and a light sweeps across them
+   while the model works (about 1.5 s), ticking quietly.
+3. Your words appear at the cursor. A bright tick, and the pill fades away.
 
-That's it. Two other gestures:
+That's holding. The other gestures, all on the same key:
 
-- **Tap** the key instead of holding: recording starts and keeps going until
-  you tap again. Better for long dictation — nothing to hold down.
-- **Esc** while recording: throw the take away. A low note, an ×, nothing pasted.
+| gesture | what it does |
+| --- | --- |
+| **hold** | record while held, release to finish |
+| **double-tap** | hands-free: recording continues with nothing held |
+| **one press** (while hands-free) | stop and transcribe |
+| **triple-tap** | paste your **last transcript** again |
+| **Esc** | cancel — a low note, nothing pasted |
+| single tap | nothing (on purpose — see Troubleshooting) |
 
-Want to try it without pasting into anything? `flowlite run --no-paste` prints
+Hands-free is for long dictation. Triple-tap is your safety net: if nothing
+was focused when the words arrived, click into the right field and triple-tap.
+
+Want to try it without pasting into anything? `flowlite --no-paste` prints
 transcripts in the terminal instead.
 
 ---
 
 ## Everyday use
 
-**Keep it running.** `flowlite run` in a Terminal tab is the recommended way —
-it shows a live log and Ctrl+C stops it. Or run it in the background:
+**`flowlite` → banner → dictate → Ctrl+C.** That is the whole loop. Keep it
+running in a Terminal tab (or under tmux): you get a live one-line log of every
+transcript, and Ctrl+C stops it. If you run `flowlite` while one is already
+listening, it tells you so and does nothing — two listeners would paste twice.
 
-```bash
-flowlite start      # runs in the background, logs to a file
-flowlite status
-flowlite stop
-```
+Prefer no tab at all? `flowlite settings → Background daemon → Start in
+background` runs it detached, logging to a file; the same row stops or
+restarts it. The foreground is still recommended: macOS occasionally drops the
+keyboard permission of a detached process.
 
-**Type `flowlite` alone** at any time for a one-screen summary: model, key,
-permission status, whether it's running, and the one thing to do next.
+**Nothing is ever lost.** Every transcript — including ones that had nowhere
+to paste — is kept. `flowlite settings → Recent transcripts` lists the last
+ten; pick one and it is copied to the clipboard, ready for ⌘V.
 
 ### What the pill and sounds mean
 
 | you see | you hear | it means |
 | --- | --- | --- |
 | waveform | rising two notes | mic is live — speak |
-| spinner | falling two notes, then soft ticks | recording ended, transcribing |
-| ✓ (green) | bright tick | text was pasted |
-| × (grey) | one low note | cancelled, or nothing was heard |
-| × (red) | two low buzzes | something failed — check the terminal |
+| bars settle, a light sweeps across them | falling two notes, then soft ticks | recording ended, transcribing |
+| pill fades out | bright tick | text was pasted |
+| pill fades out | one low note | cancelled, or nothing was heard |
+| bars pulse **red** twice | two low buzzes | something failed — check the terminal |
 
-FlowLite never pastes on silence: a mis-tap produces the grey ×, not a stray
-"Thank you." in your document.
+The pill never shows text. FlowLite never pastes on silence either: a mis-tap
+produces nothing, not a stray "Thank you." in your document.
 
 ### Changing settings
 
 ```bash
-flowlite key ctrl_r          # dictation key: alt_r ctrl_r cmd_r shift_r f13 f14 f15
-flowlite mic list            # see microphones;  flowlite mic "AirPods Pro"
-flowlite lang hi             # force a language (en, hi, es, fr …) — or: flowlite lang auto
-flowlite sounds off          # silence the cues
+flowlite settings
 ```
 
-Each command with no argument shows the current value. Restart `flowlite run`
-for changes to take effect.
+One menu; every row shows its current value. Pick a row, change it, it is saved
+at once. Rows marked ⟳ take effect the next time you start `flowlite` (the
+menu reminds you once, on the way out, if one is running).
+
+| row | what it is |
+| --- | --- |
+| Speech model ⟳ | which Whisper model — see below |
+| Dictation key ⟳ | Right Option by default; also Right Control, Right Command, Right Shift, F13–F15 |
+| Hold threshold ⟳ | how long a press must last to count as a hold rather than a tap (400 ms) |
+| Pill position ⟳ | bottom, top, left or right edge — with a live preview |
+| Microphone ⟳ | system default (follows AirPods and headsets), or a specific device |
+| Language ⟳ | auto-detect, or fix one (en, hi, es, fr, …) for short phrases |
+| Sounds ⟳ | on or off — "Play the cues" lets you hear them first |
+| Test microphone | records 4 seconds and prints the transcript — no key, no paste |
+| Recent transcripts | the last ten; pick one to copy it |
+| Background daemon | start, stop or restart the detached daemon |
+| Reset to defaults | every setting back to how it shipped; the model stays |
+| Uninstall FlowLite | removes everything (asks you to type `yes`) |
 
 ### Choosing a different model
 
-```bash
-flowlite models              # what exists, what's installed
-flowlite use small.en        # switch: downloads it, then removes the old one
-```
+`flowlite settings → Speech model` lists them; choosing one downloads it and
+removes the old one.
 
 | model | size | when to pick it |
 | --- | --- | --- |
@@ -203,11 +246,41 @@ interrupted download never leaves you without a working model.
 
 ---
 
+## Updating FlowLite
+
+```bash
+flowlite update            # fetch the latest release and swap it in
+flowlite update --check    # only say whether there is one
+```
+
+`update` downloads the release for this Mac from GitHub, checks that the file
+is complete and actually runs, then replaces the program in place. Your
+settings and model are untouched. If `flowlite` is running, it keeps the old
+version until you restart it (Ctrl+C, then `flowlite`).
+
+FlowLite also looks for a newer release on its own, at most once a day, and
+mentions it in the listening banner and in `flowlite doctor`. That check is
+the only network request FlowLite ever makes apart from the model download
+and the update itself; set `FLOWLITE_NO_UPDATE_CHECK=1` to turn it off. The
+explicit `flowlite update` still works either way.
+
+How releases are cut is under [Versioning and releases](#versioning-and-releases).
+
+---
+
 ## Troubleshooting
 
-**I press the key and nothing happens at all.**
+Start with `flowlite doctor`: it checks the engine, model, microphone,
+clipboard, config directory and — the one that matters — the keyboard
+permission, and prints the fix for anything that fails.
+
+**I tapped the key once and nothing happened.**
+That's by design: a single tap does nothing, so an accidental brush of the key
+never starts a recording. **Hold** it to talk, or **double-tap** for hands-free.
+
+**I press the key and nothing happens at all — not even when holding.**
 Accessibility isn't granted. Run `flowlite doctor` — it names the app to switch
-on. After switching it on, **quit and reopen Terminal**, then `flowlite run`
+on. After switching it on, **quit and reopen Terminal**, then `flowlite`
 again. macOS only re-checks the permission when the app starts.
 
 **Terminal says `zsh: killed` or the file "cannot be opened".**
@@ -218,22 +291,29 @@ line, or clear the flag as shown in Step 1.
 Normal, once. Metal compiles the model's GPU shaders on first use and caches
 them; after that, loading takes a fraction of a second.
 
-**It heard me but pasted into the wrong place.**
+**It heard me but pasted into the wrong place — or nowhere.**
 FlowLite pastes wherever the cursor is *when the text is ready*, about 1.5 s
-after you release. Don't click elsewhere in that moment.
+after you release. The transcript is never lost: click into the right field and
+**triple-tap** the key to paste it again, or copy it from
+`flowlite settings → Recent transcripts`.
 
 **The pill appears but the text never arrives.**
-Check the terminal running `flowlite run` — a paste failure shows there with a
-red × on the pill. Some apps (secure password fields, some remote desktops)
+Check the terminal running `flowlite` — a paste failure shows there and the
+pill pulses red. Some apps (secure password fields, some remote desktops)
 refuse synthetic paste.
 
-**"2 models on disk" warning.**
-Left over from before the one-model rule. `flowlite use <name>` cleans it up.
+**"2 models installed" in doctor.**
+Left over from before the one-model rule. Re-choose your model under
+`flowlite settings → Speech model` and the extra one is removed.
 
 **Microphone not working.**
-`flowlite mic list` to see what macOS sees; `flowlite test` records 4 seconds
-and prints the transcript, which isolates the microphone from everything else.
-macOS asks for microphone permission the first time; grant it to Terminal.
+`flowlite settings → Test microphone` records 4 seconds and prints the
+transcript, which isolates the microphone from everything else; the
+Microphone row shows every device macOS sees. macOS asks for microphone
+permission the first time; grant it to Terminal.
+
+**`flowlite` says it is already listening, but I can't find it.**
+It is running in the background. `flowlite settings → Background daemon → Stop`.
 
 **I have an Intel Mac.**
 Not supported. The speech engine runs on the GPU through Metal, which Intel
@@ -244,10 +324,11 @@ Macs don't have in this form.
 ## Uninstall
 
 ```bash
-flowlite uninstall
+flowlite settings
 ```
 
-Removes the model, your settings, and the program. Nothing else was ever
+Choose **Uninstall FlowLite** and type `yes`. It removes the model, your
+settings and transcript history, and the program. Nothing else was ever
 installed. Then remove Terminal from Accessibility if you like.
 
 ---
@@ -258,8 +339,9 @@ The Windows version — keyboard hook, paste, and the pill — is written and
 compiles, but **has never been run on a Windows machine**. If you try it, you
 are the first. Download `flowlite-<version>-windows-x64.zip` from
 [Releases](https://github.com/sanke08/flowlite/releases/latest), unzip it
-anywhere, keep the DLLs next to `flowlite.exe`, and run `flowlite.exe setup`.
-No special permissions are needed on Windows. The default key is Right Control.
+anywhere, keep the DLLs next to `flowlite.exe`, and run `flowlite.exe` — it
+sets itself up the first time. No special permissions are needed on Windows.
+The default key is Right Control.
 
 ---
 
@@ -278,6 +360,11 @@ Homebrew's `whisper-cpp` (`brew install whisper-cpp`) instead of compiling it.
 `make test` runs the unit tests; the whisper test additionally loads whatever
 model is installed and asserts Metal was used.
 
+Three hidden root flags exist for plumbing and are not part of the user
+interface: `--daemon` (what "Start in background" spawns), `--pill-preview
+<edge>` and `--play-cues` (what the settings menu spawns, because the pill
+needs a fresh AppKit main loop).
+
 ### How it works
 
 | step | where |
@@ -289,6 +376,7 @@ model is installed and asserts Metal was used.
 | the pill | `internal/overlay` — NSPanel + Core Graphics / layered GDI window |
 | audio cues | `internal/sound` — synthesised, one persistent output stream |
 | paste | `internal/inject` — clipboard + ⌘V / Ctrl+V keystroke, clipboard restored after |
+| transcript history | `internal/history` — `history.jsonl`, last 100 |
 | orchestration | `internal/daemon` |
 | commands | `internal/cli` |
 
@@ -297,16 +385,26 @@ library embedded, targets macOS 13+, and depends only on system frameworks.
 
 ### Versioning and releases
 
-Semantic versioning; every release is a git tag with matching binaries on
-[GitHub Releases](https://github.com/sanke08/flowlite/releases). Changes are
-recorded in [CHANGELOG.md](CHANGELOG.md); `flowlite version` prints the exact
-build. To cut a release:
+Semantic versioning. The `VERSION` file is the single source of truth, and
+**releases are automatic**: `.github/workflows/release.yml` runs on every push
+to `main`; if `VERSION` names a version that has no git tag yet, GitHub's own
+Apple Silicon runner runs the tests, builds the self-contained macOS binary and
+the Windows zip, writes `SHA256SUMS`, creates the tag and the Release. The curl
+installer and `flowlite update` pick it up within minutes. A push that does not
+change `VERSION` releases nothing.
+
+To release:
 
 ```bash
-# edit CHANGELOG.md, commit
-git tag -a v0.4.0 -m "…"
-make publish        # builds macOS (static) + Windows, uploads both
+echo 0.5.0 > VERSION          # 1. decide the version (patch / minor / major)
+$EDITOR CHANGELOG.md          # 2. say what changed
+git add -A && git commit -m "v0.5.0" && git push    # 3. that's it
 ```
+
+Watch it on the repository's **Actions** tab. `make publish` does the same from
+your machine if you ever need to release by hand (it insists HEAD is tagged
+`v<VERSION>` and the tree is clean). Untagged local builds report
+`v0.5.0-dev+<sha>` so they can never be mistaken for the release.
 
 ### Windows build
 

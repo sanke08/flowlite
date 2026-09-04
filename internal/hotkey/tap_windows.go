@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	user32                   = syscall.NewLazyDLL("user32.dll")
-	procSetWindowsHookExW    = user32.NewProc("SetWindowsHookExW")
-	procUnhookWindowsHookEx  = user32.NewProc("UnhookWindowsHookEx")
-	procCallNextHookEx       = user32.NewProc("CallNextHookEx")
+	user32                  = syscall.NewLazyDLL("user32.dll")
+	procSetWindowsHookExW   = user32.NewProc("SetWindowsHookExW")
+	procUnhookWindowsHookEx = user32.NewProc("UnhookWindowsHookEx")
+	procCallNextHookEx      = user32.NewProc("CallNextHookEx")
 )
 
 const (

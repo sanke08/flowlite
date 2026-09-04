@@ -58,3 +58,10 @@ func ClipboardRoundTrip() error {
 	}
 	return nil
 }
+
+// SetClipboard puts text on the clipboard without pasting. `flowlite settings
+// → Recent transcripts` uses it: the terminal has focus there, so a paste
+// would land in the wrong place.
+func SetClipboard(text string) error {
+	return clipboardSet(text)
+}

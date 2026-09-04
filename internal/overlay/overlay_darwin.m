@@ -1,33 +1,58 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 
-// A small capsule with no text: a waveform while listening, a spinner while
-// transcribing, a check (or ×) when done. Every transition is time-based and
-// eased, so it reads as one continuous object changing shape.
+// A small black capsule with no text, ever. It has exactly three looks:
+//   recording  — a centre-weighted waveform driven by the mic level
+//   processing — the bars settle into short equal stubs and a soft band of
+//                light sweeps back and forth across them
+//   failed     — the stubs turn red, pulse twice, then the pill fades away
+// Success and cancel draw nothing new: the pill simply fades out.
+//
+// The pill sits centred on one edge of the screen (bottom by default, or top,
+// left, right), EDGE_GAP points in from the *physical* edge — so at the bottom
+// it overlaps the Dock area on purpose. On the left/right edges the capsule
+// stands upright and the bars run horizontally, stacked top to bottom.
+// Every transition is time-based and eased, so it reads as one continuous
+// object changing shape.
 
-#define PILL_W      100.0
-#define PILL_H       30.0
+#define PILL_LONG   100.0
+#define PILL_SHORT   30.0
 #define RADIUS       15.0
-#define BOTTOM_GAP   64.0
+#define EDGE_GAP    100.0
 #define BARS          9
 #define BAR_W         3.0
 #define BAR_GAP       3.0
 #define FPS          60.0
+#define FADE_IN       0.16
+#define FADE_OUT      0.20
+#define ERROR_HOLD    0.70   // two red pulses, then fade
 
 enum { ST_HIDDEN, ST_LISTENING, ST_TRANSCRIBING, ST_PASTED, ST_CANCELLED, ST_ERROR };
+enum { POS_BOTTOM, POS_TOP, POS_LEFT, POS_RIGHT };
+
+static int position = POS_BOTTOM;
+static BOOL vertical(void) { return position == POS_LEFT || position == POS_RIGHT; }
 
 static double now_s(void) { return CACurrentMediaTime(); }
 static double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+static double mix(double a, double b, double k) { return a + (b - a) * k; }
 static double easeOut(double t) { t = clamp01(t); return 1 - pow(1 - t, 3); }
 static double easeInOut(double t) { t = clamp01(t); return t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2; }
+// Frame-rate independent exponential approach: v moves toward want with time constant tau.
+static void approach(double *v, double want, double dt, double tau) { *v += (want - *v) * (1 - exp(-dt / tau)); }
 
 @interface FLPillView : NSView {
 @public
     int    state;
     double stateAt;      // when the state last changed
+    double appearAt;     // when the pill was last shown from hidden
+    double lastTick;     // previous frame time, for dt
     double level;        // smoothed mic level
     double target;       // latest mic level
     double bars[BARS];   // per-bar smoothed heights, 0..1
+    double collapse;     // 0 = live waveform, 1 = equal stubs
+    double red;          // 0 = white, 1 = failure red
+    double shimmer;      // 0 = flat, 1 = sweeping band
 }
 @end
 
@@ -38,33 +63,28 @@ static double easeInOut(double t) { t = clamp01(t); return t < 0.5 ? 4 * t * t *
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
     double t  = now_s();
+    double dt = lastTick > 0 ? fmin(t - lastTick, 0.1) : 1.0 / FPS;
+    lastTick  = t;
     double st = t - stateAt;
     NSRect b  = self.bounds;
     double cx = NSMidX(b), cy = NSMidY(b);
+    BOOL   vert = b.size.height > b.size.width;
 
-    // Body
+    // ---- body -----------------------------------------------------------
     NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(b, 0.5, 0.5)
                                                          xRadius:RADIUS yRadius:RADIUS];
-    [[NSColor colorWithCalibratedRed:0.09 green:0.09 blue:0.11 alpha:0.95] setFill];
+    [[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:0.94] setFill];
     [body fill];
-    [[NSColor colorWithCalibratedWhite:1.0 alpha:0.10] setStroke];
+    [[NSColor colorWithCalibratedWhite:1.0 alpha:0.045] setStroke];
     [body setLineWidth:1.0];
     [body stroke];
 
-    // Layer opacities driven by state + time-in-state
-    double barsA = 0, spinA = 0, markA = 0;
-    switch (state) {
-        case ST_LISTENING:    barsA = easeOut(st / 0.18); break;
-        case ST_TRANSCRIBING: barsA = 1 - easeInOut(st / 0.22);
-                              spinA = easeOut((st - 0.08) / 0.22); break;
-        case ST_PASTED:
-        case ST_CANCELLED:
-        case ST_ERROR:        spinA = 1 - easeInOut(st / 0.15);
-                              markA = easeOut((st - 0.05) / 0.30); break;
-        default: break;
-    }
+    // ---- shape blend targets ------------------------------------------
+    approach(&collapse, state == ST_LISTENING ? 0 : 1, dt, 0.10);
+    approach(&red,      state == ST_ERROR ? 1 : 0,     dt, 0.06);
+    approach(&shimmer,  state == ST_TRANSCRIBING ? 1 : 0, dt, 0.12);
 
-    // ---- waveform -----------------------------------------------------
+    // ---- live waveform model (runs always so hand-offs are seamless) ---
     level += (target - level) * 0.5;
     double center = (BARS - 1) / 2.0;
     for (int i = 0; i < BARS; i++) {
@@ -73,62 +93,38 @@ static double easeInOut(double t) { t = clamp01(t); return t < 0.5 ? 4 * t * t *
         double desired = clamp01(level * 1.9) * env * wob;
         bars[i] += (desired - bars[i]) * 0.35;
     }
-    if (barsA > 0.001) {
-        double span = BARS * (BAR_W + BAR_GAP) - BAR_GAP;
-        double x = cx - span / 2;
-        double maxH = PILL_H - 12;
-        [[NSColor colorWithCalibratedWhite:1.0 alpha:0.92 * barsA] setFill];
-        for (int i = 0; i < BARS; i++) {
-            double h = (3.0 + bars[i] * (maxH - 3.0)) * (0.15 + 0.85 * barsA);
-            NSRect br = NSMakeRect(x, cy - h / 2, BAR_W, h);
-            [[NSBezierPath bezierPathWithRoundedRect:br xRadius:1.5 yRadius:1.5] fill];
-            x += BAR_W + BAR_GAP;
-        }
-    }
 
-    // ---- spinner ------------------------------------------------------
-    if (spinA > 0.001) {
-        double scale = 0.7 + 0.3 * spinA;
-        double r = 7.5 * scale;
-        double start = fmod(-t * 396.0, 360.0);          // 1.1 rev/s
-        NSBezierPath *arc = [NSBezierPath bezierPath];
-        [arc appendBezierPathWithArcWithCenter:NSMakePoint(cx, cy) radius:r
-                                    startAngle:start endAngle:start - 270 clockwise:YES];
-        [arc setLineWidth:2.4];
-        [arc setLineCapStyle:NSLineCapStyleRound];
-        [[NSColor colorWithCalibratedRed:0.47 green:0.67 blue:1.0 alpha:spinA] setStroke];
-        [arc stroke];
-    }
+    double barsA = easeOut((t - appearAt) / 0.18);
+    if (barsA <= 0.001) return;
 
-    // ---- check / cross ------------------------------------------------
-    if (markA > 0.001) {
-        NSBezierPath *p = [NSBezierPath bezierPath];
-        [p setLineWidth:2.5];
-        [p setLineCapStyle:NSLineCapStyleRound];
-        [p setLineJoinStyle:NSLineJoinStyleRound];
-        NSColor *c;
-        if (state == ST_PASTED) {
-            c = [NSColor colorWithCalibratedRed:0.24 green:0.81 blue:0.56 alpha:1];
-            // Two segments drawn in sequence: short down-stroke, long up-stroke.
-            NSPoint a = NSMakePoint(cx - 6.5, cy + 0.5);
-            NSPoint m = NSMakePoint(cx - 2.0, cy - 4.0);
-            NSPoint z = NSMakePoint(cx + 6.5, cy + 5.0);
-            double s1 = clamp01(markA / 0.4), s2 = clamp01((markA - 0.4) / 0.6);
-            [p moveToPoint:a];
-            [p lineToPoint:NSMakePoint(a.x + (m.x - a.x) * s1, a.y + (m.y - a.y) * s1)];
-            if (s2 > 0) [p lineToPoint:NSMakePoint(m.x + (z.x - m.x) * s2, m.y + (z.y - m.y) * s2)];
-        } else {
-            c = (state == ST_ERROR)
-                ? [NSColor colorWithCalibratedRed:1.0 green:0.36 blue:0.36 alpha:1]
-                : [NSColor colorWithCalibratedWhite:0.62 alpha:1];
-            double k = 5.0 * markA;
-            [p moveToPoint:NSMakePoint(cx - k, cy - k)];
-            [p lineToPoint:NSMakePoint(cx + k, cy + k)];
-            [p moveToPoint:NSMakePoint(cx - k, cy + k)];
-            [p lineToPoint:NSMakePoint(cx + k, cy - k)];
-        }
-        [c setStroke];
-        [p stroke];
+    // Sweep position for the processing shimmer: 0..1 along the bars,
+    // starting at one end when processing begins, back and forth at ~0.7 Hz.
+    double sweep = 0.5 - 0.5 * cos(2 * M_PI * st / 1.4);
+    // Failure: two bright pulses over ERROR_HOLD, bright at 0, .35, .70.
+    double pulse = 0.45 + 0.55 * (0.5 + 0.5 * cos(2 * M_PI * st / (ERROR_HOLD / 2)));
+
+    double maxL = PILL_SHORT - 12;
+    double span = BARS * (BAR_W + BAR_GAP) - BAR_GAP;
+    double p = (vert ? cy : cx) - span / 2;
+    for (int i = 0; i < BARS; i++) {
+        double u    = (double)i / (BARS - 1);
+        double glow = exp(-pow((u - sweep) / 0.16, 2)) * shimmer;
+
+        double waveL = 3.0 + bars[i] * (maxL - 3.0);
+        double stubL = 5.0 + 2.0 * glow + 3.0 * pulse * red;
+        double len   = mix(waveL, stubL, collapse) * (0.15 + 0.85 * barsA);
+
+        double a = mix(0.92, 0.30 + 0.62 * glow, shimmer);   // shimmer band
+        a = mix(a, pulse, red);                               // red pulses
+        NSColor *c = [NSColor colorWithCalibratedRed:1.0
+                                               green:mix(1.0, 0.36, red)
+                                                blue:mix(1.0, 0.36, red)
+                                               alpha:a * barsA];
+        [c setFill];
+        NSRect r = vert ? NSMakeRect(cx - len / 2, p, len, BAR_W)
+                        : NSMakeRect(p, cy - len / 2, BAR_W, len);
+        [[NSBezierPath bezierPathWithRoundedRect:r xRadius:1.5 yRadius:1.5] fill];
+        p += BAR_W + BAR_GAP;
     }
 }
 @end
@@ -139,12 +135,13 @@ static NSPanel    *panel = nil;
 static FLPillView *view  = nil;
 static NSTimer    *timer = nil;
 static double      shownAt = 0;   // fade-in start
-static double      hideAt  = 0;   // >0 while fading out
+static double      hideAt  = 0;   // >0 while fading out (may be in the future)
 static NSPoint     baseOrigin;
+static NSPoint     inward;        // unit vector pointing away from the screen edge
 
 static void ensurePanel(void) {
     if (panel) return;
-    NSRect frame = NSMakeRect(0, 0, PILL_W, PILL_H);
+    NSRect frame = NSMakeRect(0, 0, PILL_LONG, PILL_SHORT);
     panel = [[NSPanel alloc] initWithContentRect:frame
                                        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
                                          backing:NSBackingStoreBuffered
@@ -162,15 +159,36 @@ static void ensurePanel(void) {
     [panel setContentView:view];
 }
 
-// Bottom-centre of whichever screen holds the mouse.
+// Centred on the chosen edge of whichever screen holds the mouse, EDGE_GAP
+// in from the physical edge (not the visibleFrame — the Dock does not push it).
 static void reposition(void) {
     NSPoint mouse = [NSEvent mouseLocation];
     NSScreen *target = [NSScreen mainScreen];
     for (NSScreen *s in [NSScreen screens]) {
         if (NSMouseInRect(mouse, [s frame], NO)) { target = s; break; }
     }
-    NSRect vf = [target visibleFrame];
-    baseOrigin = NSMakePoint(NSMidX(vf) - PILL_W / 2, NSMinY(vf) + BOTTOM_GAP);
+    NSRect sf = [target frame];
+    double w = vertical() ? PILL_SHORT : PILL_LONG;
+    double h = vertical() ? PILL_LONG : PILL_SHORT;
+    switch (position) {
+        case POS_TOP:
+            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMaxY(sf) - EDGE_GAP - h);
+            inward = NSMakePoint(0, -1);
+            break;
+        case POS_LEFT:
+            baseOrigin = NSMakePoint(NSMinX(sf) + EDGE_GAP, NSMidY(sf) - h / 2);
+            inward = NSMakePoint(1, 0);
+            break;
+        case POS_RIGHT:
+            baseOrigin = NSMakePoint(NSMaxX(sf) - EDGE_GAP - w, NSMidY(sf) - h / 2);
+            inward = NSMakePoint(-1, 0);
+            break;
+        default:
+            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMinY(sf) + EDGE_GAP);
+            inward = NSMakePoint(0, 1);
+            break;
+    }
+    [panel setFrame:NSMakeRect(baseOrigin.x, baseOrigin.y, w, h) display:NO];
 }
 
 static void stopTimer(void) {
@@ -181,12 +199,14 @@ static void stopTimer(void) {
 
 static void tick(void) {
     double t = now_s();
-    double alpha = easeOut((t - shownAt) / 0.16);
-    double lift  = 6.0 * (1.0 - alpha);                 // slides up as it appears
+    if (view->state == ST_ERROR && hideAt == 0 && t - view->stateAt >= ERROR_HOLD) hideAt = t;
+
+    double alpha = easeOut((t - shownAt) / FADE_IN);
+    double slide = -6.0 * (1.0 - alpha);                // arrives from the edge
     if (hideAt > 0) {
-        double f = easeInOut((t - hideAt) / 0.24);
+        double f = easeInOut((t - hideAt) / FADE_OUT);
         alpha *= (1.0 - f);
-        lift  -= 4.0 * f;                               // sinks slightly as it goes
+        slide -= 4.0 * f;                               // drifts back toward it
         if (f >= 1.0) {
             [panel orderOut:nil];
             view->state = ST_HIDDEN;
@@ -196,7 +216,7 @@ static void tick(void) {
         }
     }
     [panel setAlphaValue:alpha];
-    [panel setFrameOrigin:NSMakePoint(baseOrigin.x, baseOrigin.y + lift)];
+    [panel setFrameOrigin:NSMakePoint(baseOrigin.x + inward.x * slide, baseOrigin.y + inward.y * slide)];
     [view setNeedsDisplay:YES];
 }
 
@@ -208,22 +228,38 @@ static void startTimer(void) {
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
 }
 
+static bool terminal(int state) { return state == ST_PASTED || state == ST_CANCELLED; }
+void flowlite_overlay_hide(void);
+
+void flowlite_overlay_set_position(int pos) {
+    if (pos < POS_BOTTOM || pos > POS_RIGHT) pos = POS_BOTTOM;
+    position = pos;
+}
+
 void flowlite_overlay_show(int state, const char *text) {
     (void)text;
     @autoreleasepool {
         ensurePanel();
         BOOL fresh = (view->state == ST_HIDDEN) || hideAt > 0;
         double t = now_s();
+        if (fresh && terminal(state)) {
+            // Nothing to show: success/cancel have no look of their own.
+            if (view->state != ST_HIDDEN) flowlite_overlay_hide();
+            return;
+        }
         view->state = state;
         view->stateAt = t;
         hideAt = 0;
         if (fresh) {
             shownAt = t;
+            view->appearAt = t;
+            view->lastTick = 0;
             view->level = view->target = 0;
+            view->collapse = (state == ST_LISTENING) ? 0 : 1;
+            view->red = view->shimmer = 0;
             for (int i = 0; i < BARS; i++) view->bars[i] = 0;
             reposition();
             [panel setAlphaValue:0];
-            [panel setFrameOrigin:baseOrigin];
             [panel orderFrontRegardless];
         }
         startTimer();
@@ -237,6 +273,7 @@ void flowlite_overlay_set_state(int state, const char *text) {
         view->state = state;
         view->stateAt = now_s();
         hideAt = 0;
+        if (terminal(state)) hideAt = view->stateAt;    // fade out right away
         startTimer();
         [view setNeedsDisplay:YES];
     }
@@ -250,7 +287,9 @@ void flowlite_overlay_set_level(float level) {
 void flowlite_overlay_hide(void) {
     @autoreleasepool {
         if (!panel || view->state == ST_HIDDEN || hideAt > 0) return;
-        hideAt = now_s();
+        double t = now_s();
+        // Let a failure finish its two pulses before it goes.
+        hideAt = (view->state == ST_ERROR) ? fmax(t, view->stateAt + ERROR_HOLD) : t;
         startTimer();
     }
 }

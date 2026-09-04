@@ -1,34 +1,21 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/charmbracelet/huh"
-	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/sanke08/flowlite/internal/catalog"
+	"github.com/sanke08/flowlite/internal/config"
 	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/permissions"
 )
 
-var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Interactive first-run: permission, model download, dictation key",
-	RunE:  runSetup,
-}
-
-func runSetup(cmd *cobra.Command, args []string) error {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return errors.New("setup is interactive — in scripts use: flowlite download <model>, flowlite use <model>, flowlite key <name>")
-	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
+// runSetup is the first-run wizard, reached from bare `flowlite` when no
+// model is on disk yet. It asks the three things that matter — permission,
+// model, key — and saves. Whatever comes next (the permission steps, or
+// dictating) is the root command's job, so nothing is retyped.
+func runSetup(cfg *config.Config) error {
 	fmt.Println(bold("FlowLite setup"))
 	fmt.Println(dim("  Everything runs on this machine. The only download is the speech model."))
 	fmt.Println()
@@ -37,7 +24,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if permissions.Needed() && !permissions.Trusted() {
 		fmt.Println(warn("macOS is not letting " + hostApp() + " see the keyboard yet."))
 		fmt.Println(dim("  Without this the dictation key does nothing at all."))
-		var ask bool = true
+		ask := true
 		if err := huh.NewConfirm().
 			Title("Open the macOS Accessibility prompt now?").
 			Description("It adds " + hostApp() + " to Privacy & Security → Accessibility; you then switch it on.").
@@ -86,52 +73,16 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	key := cfg.Hotkey
 	if err := huh.NewSelect[string]().
 		Title("Dictation key").
-		Description("Tap to start and stop, hold to dictate while pressed, Esc to cancel.").
+		Description("Hold to talk · double-tap for hands-free, press again to stop · triple-tap pastes your last transcript · Esc cancels.").
 		Options(keyOpts...).Value(&key).Run(); err != nil {
 		return err
 	}
 	cfg.Hotkey = key
-
 	if err := cfg.Save(); err != nil {
 		return err
 	}
 
-	// 4. Put the binary somewhere `flowlite` resolves from any terminal.
-	if !runningFromPath() {
-		doInstall := true
-		if err := huh.NewConfirm().
-			Title("Install flowlite so it works from any terminal?").
-			Description("Copies this file to " + installDir()).
-			Affirmative("Yes").Negative("Skip").Value(&doInstall).Run(); err != nil {
-			return err
-		}
-		if doInstall {
-			if dest, err := installSelf(); err != nil {
-				fmt.Println(warn("  install skipped: " + err.Error()))
-			} else {
-				fmt.Printf("%s installed to %s\n", ok("✓"), dest)
-				if !onPath(filepath.Dir(dest)) {
-					fmt.Println(dim("  add to ~/.zshrc:  export PATH=\"" + filepath.Dir(dest) + ":$PATH\""))
-				}
-			}
-		}
-	}
-
 	fmt.Println()
 	fmt.Printf("%s saved: %s, %s\n", ok("✓"), m.Label, hotkey.Label(key))
-	fmt.Println()
-	if permissions.Needed() && !permissions.Trusted() {
-		fmt.Println("Next:")
-		fmt.Println("  1. System Settings → Privacy & Security → Accessibility → switch on", bold(hostApp()))
-		fmt.Println("  2.", blue("flowlite doctor"), dim("to confirm"))
-		fmt.Println("  3.", blue("flowlite run"))
-	} else {
-		fmt.Println("Next:", blue("flowlite run"), dim("— then tap "+hotkey.Label(key)+" in any text field"))
-		fmt.Println(dim("      or try the pipeline alone first: flowlite test"))
-	}
 	return nil
-}
-
-func init() {
-	rootCmd.AddCommand(setupCmd)
 }

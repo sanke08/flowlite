@@ -39,7 +39,7 @@ var hallucinations = map[string]struct{}{
 	"thanks for watching": {}, "thank you for watching": {},
 	"please subscribe": {}, "like and subscribe": {},
 	"subtitles by the amara org community": {},
-	"bye": {}, "bye bye": {}, "goodbye": {}, "okay": {}, "ok": {}, "so": {},
+	"bye":                                  {}, "bye bye": {}, "goodbye": {}, "okay": {}, "ok": {}, "so": {},
 	"um": {}, "uh": {}, "hmm": {}, "mm": {},
 	"blank audio": {}, "silence": {}, "music": {}, "applause": {}, "beep": {},
 }

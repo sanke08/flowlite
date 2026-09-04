@@ -18,14 +18,15 @@ const appDir = "FlowLite"
 
 // Config is everything the user can change.
 type Config struct {
-	Model            string `json:"model"`             // catalog key; "" until setup
+	Model            string `json:"model"` // catalog key; "" until setup
 	Hotkey           string `json:"hotkey"`
 	HoldThresholdMS  int    `json:"hold_threshold_ms"` // tap vs hold cut-off
 	Language         string `json:"language"`          // "" = autodetect
 	InputDevice      string `json:"input_device"`      // device name; "" = default
 	RestoreClipboard bool   `json:"restore_clipboard"`
 	Sounds           bool   `json:"sounds"`
-	MaxSeconds       int    `json:"max_seconds"` // hard stop for a forgotten toggle
+	MaxSeconds       int    `json:"max_seconds"`   // hard stop for a forgotten toggle
+	PillPosition     string `json:"pill_position"` // screen edge the pill sits on: bottom, top, left, right
 }
 
 // Default is a fresh, unconfigured settings object.
@@ -36,6 +37,7 @@ func Default() *Config {
 		RestoreClipboard: true,
 		Sounds:           true,
 		MaxSeconds:       300,
+		PillPosition:     "bottom",
 	}
 }
 
@@ -114,6 +116,11 @@ func Load() (*Config, error) {
 	}
 	if !hotkey.Valid(c.Hotkey) {
 		c.Hotkey = hotkey.DefaultName()
+	}
+	switch c.PillPosition {
+	case "bottom", "top", "left", "right":
+	default:
+		c.PillPosition = "bottom"
 	}
 	return c, nil
 }

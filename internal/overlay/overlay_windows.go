@@ -12,10 +12,13 @@ import (
 	"github.com/sanke08/flowlite/internal/mainloop"
 )
 
-// A small layered, top-most, non-activating capsule painted with GDI: bars
-// while listening, a spinner while transcribing, a check or × when done.
-// Written against the Win32 API and cross-compiled from macOS; it has not
-// yet been run on Windows.
+// A small layered, top-most, non-activating black capsule painted with GDI.
+// Same three looks as the macOS pill and no text: a waveform while
+// listening, short stubs with a sweeping shimmer while transcribing, red
+// pulses on failure; success and cancel just fade out. It sits centred on
+// the chosen screen edge, edgeGap px in from the physical edge (upright on
+// the left/right edges). Written against the Win32 API and cross-compiled
+// from macOS; it has not yet been run on Windows.
 
 var (
 	user32 = syscall.NewLazyDLL("user32.dll")
@@ -33,7 +36,7 @@ var (
 	pSetTimer              = user32.NewProc("SetTimer")
 	pKillTimer             = user32.NewProc("KillTimer")
 	pSetLayeredWindowAttrs = user32.NewProc("SetLayeredWindowAttributes")
-	pSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
+	pGetSystemMetrics      = user32.NewProc("GetSystemMetrics")
 	pSetWindowRgn          = user32.NewProc("SetWindowRgn")
 	pFillRect              = user32.NewProc("FillRect")
 	pGetModuleHandleW      = kernel.NewProc("GetModuleHandleW")
@@ -44,17 +47,15 @@ var (
 	pSelectObject       = gdi32.NewProc("SelectObject")
 	pRoundRect          = gdi32.NewProc("RoundRect")
 	pGetStockObject     = gdi32.NewProc("GetStockObject")
-	pExtCreatePen       = gdi32.NewProc("ExtCreatePen")
-	pMoveToEx           = gdi32.NewProc("MoveToEx")
-	pLineTo             = gdi32.NewProc("LineTo")
-	pArc                = gdi32.NewProc("Arc")
-	pSetArcDirection    = gdi32.NewProc("SetArcDirection")
 )
 
 const (
-	pillW, pillH = 100, 30
-	barCount     = 9
-	bottomGap    = 64
+	pillLong, pillShort = 100, 30
+	barCount            = 9
+	edgeGap             = 100
+	fadeIn              = 0.16
+	fadeOut             = 0.20
+	errorHold           = 0.70 // two red pulses, then fade
 
 	wsPopup          = 0x80000000
 	wsExTopmost      = 0x00000008
@@ -64,16 +65,13 @@ const (
 	wsExTransparent  = 0x00000020
 	swHide           = 0
 	swShowNoActivate = 4
+	swpNoActivate    = 0x0010
 	wmPaint          = 0x000F
 	wmTimer          = 0x0113
 	lwaAlpha         = 0x2
-	spiGetWorkArea   = 0x0030
+	smCxScreen       = 0
+	smCyScreen       = 1
 	nullPen          = 8
-	nullBrush        = 5
-	psGeometric      = 0x00010000
-	psEndcapRound    = 0x00000000
-	psJoinRound      = 0x00000000
-	adCounterClock   = 1
 )
 
 type rect struct{ left, top, right, bottom int32 }
@@ -92,11 +90,6 @@ type wndClassEx struct {
 	menuName, className           *uint16
 	iconSm                        uintptr
 }
-type logBrush struct {
-	style uint32
-	color uintptr
-	hatch uintptr
-}
 
 var (
 	mu        sync.Mutex
@@ -104,16 +97,27 @@ var (
 	state     = Hidden
 	stateAt   time.Time
 	shownAt   time.Time
-	hideAt    time.Time
+	hideAt    time.Time // non-zero while fading out (may be in the future)
+	lastTick  time.Time
 	level     float64
 	target    float64
 	bars      [barCount]float64
+	collapse  float64 // 0 = live waveform, 1 = equal stubs
+	red       float64 // 0 = white, 1 = failure red
+	shimmer   float64 // 0 = flat, 1 = sweeping band
+	posCode   int     // 0 bottom, 1 top, 2 left, 3 right
+	baseX     int32
+	baseY     int32
+	winW      int32
+	winH      int32
+	inX, inY  float64 // unit vector pointing away from the screen edge
 	wndProcCB = syscall.NewCallback(wndProc)
 )
 
-func rgb(r, g, b byte) uintptr { return uintptr(r) | uintptr(g)<<8 | uintptr(b)<<16 }
-func clamp01(v float64) float64 { return math.Max(0, math.Min(1, v)) }
-func easeOut(t float64) float64 { t = clamp01(t); return 1 - math.Pow(1-t, 3) }
+func rgb(r, g, b byte) uintptr    { return uintptr(r) | uintptr(g)<<8 | uintptr(b)<<16 }
+func clamp01(v float64) float64   { return math.Max(0, math.Min(1, v)) }
+func mix(a, b, k float64) float64 { return a + (b-a)*k }
+func easeOut(t float64) float64   { t = clamp01(t); return 1 - math.Pow(1-t, 3) }
 func easeInOut(t float64) float64 {
 	t = clamp01(t)
 	if t < 0.5 {
@@ -121,6 +125,7 @@ func easeInOut(t float64) float64 {
 	}
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
+func approach(v *float64, want, dt, tau float64) { *v += (want - *v) * (1 - math.Exp(-dt/tau)) }
 
 // blend mixes two COLORREFs: a*fg + (1-a)*bg.
 func blend(fg, bg uintptr, a float64) uintptr {
@@ -132,10 +137,13 @@ func blend(fg, bg uintptr, a float64) uintptr {
 	return ch(0) | ch(8)<<8 | ch(16)<<16
 }
 
-func pen(color uintptr, width int) uintptr {
-	lb := logBrush{style: 0, color: color}
-	p, _, _ := pExtCreatePen.Call(psGeometric|psEndcapRound|psJoinRound, uintptr(width), uintptr(unsafe.Pointer(&lb)), 0, 0)
-	return p
+func vertical() bool        { return posCode == 2 || posCode == 3 }
+func terminal(s State) bool { return s == Pasted || s == Cancelled }
+
+func applyPosition(code int) {
+	mu.Lock()
+	posCode = code
+	mu.Unlock()
 }
 
 func wndProc(h uintptr, m uint32, w, l uintptr) uintptr {
@@ -156,14 +164,22 @@ func wndProc(h uintptr, m uint32, w, l uintptr) uintptr {
 
 func tickWindow() {
 	now := time.Now()
-	alpha := easeOut(now.Sub(shownAt).Seconds() / 0.16)
 	mu.Lock()
+	if state == Error && hideAt.IsZero() && now.Sub(stateAt).Seconds() >= errorHold {
+		hideAt = now
+	}
+	alpha := easeOut(now.Sub(shownAt).Seconds() / fadeIn)
+	slide := -6.0 * (1 - alpha) // arrives from the edge
 	hiding := !hideAt.IsZero()
 	var f float64
 	if hiding {
-		f = easeInOut(now.Sub(hideAt).Seconds() / 0.24)
+		f = easeInOut(now.Sub(hideAt).Seconds() / fadeOut)
 		alpha *= 1 - f
+		slide -= 4.0 * f // drifts back toward it
 	}
+	x := baseX + int32(math.Round(inX*slide))
+	y := baseY + int32(math.Round(inY*slide))
+	w, h := winW, winH
 	mu.Unlock()
 	if hiding && f >= 1 {
 		pKillTimer.Call(hwnd, 1)
@@ -175,124 +191,101 @@ func tickWindow() {
 		return
 	}
 	pSetLayeredWindowAttrs.Call(hwnd, 0, uintptr(240*alpha), lwaAlpha)
+	pSetWindowPos.Call(hwnd, ^uintptr(0) /* HWND_TOPMOST */, uintptr(x), uintptr(y), uintptr(w), uintptr(h), swpNoActivate)
 	pInvalidateRect.Call(hwnd, 0, 0)
 }
 
 func paint(hdc uintptr) {
-	mu.Lock()
-	st, sAt, lv, tg := state, stateAt, level, target
-	mu.Unlock()
 	now := time.Now()
 	t := float64(now.UnixNano()) / 1e9
-	stT := now.Sub(sAt).Seconds()
 
-	bgc := rgb(23, 23, 28)
-	full := rect{0, 0, pillW, pillH}
-	bg, _, _ := pCreateSolidBrush.Call(bgc)
-	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&full)), bg)
-	pDeleteObject.Call(bg)
-
-	var barsA, spinA, markA float64
-	switch st {
-	case Listening:
-		barsA = easeOut(stT / 0.18)
-	case Transcribing:
-		barsA = 1 - easeInOut(stT/0.22)
-		spinA = easeOut((stT - 0.08) / 0.22)
-	case Pasted, Cancelled, Error:
-		spinA = 1 - easeInOut(stT/0.15)
-		markA = easeOut((stT - 0.05) / 0.30)
-	}
-
-	cx, cy := float64(pillW)/2, float64(pillH)/2
-
-	// waveform
-	lv += (tg - lv) * 0.5
-	center := float64(barCount-1) / 2
 	mu.Lock()
-	level = lv
+	dt := 1.0 / 60
+	if !lastTick.IsZero() {
+		dt = math.Min(now.Sub(lastTick).Seconds(), 0.1)
+	}
+	lastTick = now
+	st := now.Sub(stateAt).Seconds()
+	appear := easeOut(now.Sub(shownAt).Seconds() / 0.18)
+	vert := vertical()
+	w, h := float64(winW), float64(winH)
+
+	// Shape blends.
+	wantCollapse, wantRed, wantShimmer := 1.0, 0.0, 0.0
+	if state == Listening {
+		wantCollapse = 0
+	}
+	if state == Error {
+		wantRed = 1
+	}
+	if state == Transcribing {
+		wantShimmer = 1
+	}
+	approach(&collapse, wantCollapse, dt, 0.10)
+	approach(&red, wantRed, dt, 0.06)
+	approach(&shimmer, wantShimmer, dt, 0.12)
+
+	// Live waveform model (always runs so hand-offs are seamless).
+	level += (target - level) * 0.5
+	center := float64(barCount-1) / 2
 	for i := 0; i < barCount; i++ {
 		env := 1.0 - 0.55*math.Pow(math.Abs(float64(i)-center)/center, 1.6)
 		wob := 0.72 + 0.28*math.Sin(t*(6.5+float64(i)*0.9)+float64(i)*1.7)
-		desired := clamp01(lv*1.9) * env * wob
+		desired := clamp01(level*1.9) * env * wob
 		bars[i] += (desired - bars[i]) * 0.35
 	}
-	bh := bars
+	bh, col, rd, sh := bars, collapse, red, shimmer
 	mu.Unlock()
-	if barsA > 0.001 {
-		const barW, gap = 3.0, 3.0
-		span := barCount*(barW+gap) - gap
-		x := cx - span/2
-		maxH := float64(pillH - 12)
-		br, _, _ := pCreateSolidBrush.Call(blend(rgb(255, 255, 255), bgc, 0.92*barsA))
+
+	// Body: black; the layered-window alpha supplies the 0.94 translucency.
+	bgc := rgb(0, 0, 0)
+	full := rect{0, 0, int32(w), int32(h)}
+	bg, _, _ := pCreateSolidBrush.Call(bgc)
+	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&full)), bg)
+	pDeleteObject.Call(bg)
+	if appear <= 0.001 {
+		return
+	}
+
+	// Shimmer sweep 0..1 along the bars at ~0.7 Hz; failure pulse bright at 0, .35, .70.
+	sweep := 0.5 - 0.5*math.Cos(2*math.Pi*st/1.4)
+	pulse := 0.45 + 0.55*(0.5+0.5*math.Cos(2*math.Pi*st/(errorHold/2)))
+
+	const barW, gap = 3.0, 3.0
+	maxL := float64(pillShort - 12)
+	span := barCount*(barW+gap) - gap
+	cx, cy := w/2, h/2
+	p := cx - span/2
+	if vert {
+		p = cy - span/2
+	}
+	np, _, _ := pGetStockObject.Call(nullPen)
+	op, _, _ := pSelectObject.Call(hdc, np)
+	for i := 0; i < barCount; i++ {
+		u := float64(i) / float64(barCount-1)
+		glow := math.Exp(-math.Pow((u-sweep)/0.16, 2)) * sh
+
+		waveL := 3.0 + bh[i]*(maxL-3.0)
+		stubL := 5.0 + 2.0*glow + 3.0*pulse*rd
+		ln := mix(waveL, stubL, col) * (0.15 + 0.85*appear)
+
+		a := mix(0.92, 0.30+0.62*glow, sh)
+		a = mix(a, pulse, rd)
+		c := rgb(255, byte(255*mix(1, 0.36, rd)), byte(255*mix(1, 0.36, rd)))
+		br, _, _ := pCreateSolidBrush.Call(blend(c, bgc, a*appear))
 		o, _, _ := pSelectObject.Call(hdc, br)
-		np, _, _ := pGetStockObject.Call(nullPen)
-		op, _, _ := pSelectObject.Call(hdc, np)
-		for i := 0; i < barCount; i++ {
-			h := (3.0 + bh[i]*(maxH-3.0)) * (0.15 + 0.85*barsA)
-			pRoundRect.Call(hdc, uintptr(int32(x)), uintptr(int32(cy-h/2)), uintptr(int32(x+barW+0.5)), uintptr(int32(cy+h/2+0.5)), 3, 3)
-			x += barW + gap
+		var r rect
+		if vert {
+			r = rect{int32(cx - ln/2), int32(p), int32(cx + ln/2 + 0.5), int32(p + barW + 0.5)}
+		} else {
+			r = rect{int32(p), int32(cy - ln/2), int32(p + barW + 0.5), int32(cy + ln/2 + 0.5)}
 		}
-		pSelectObject.Call(hdc, op)
+		pRoundRect.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(r.right), uintptr(r.bottom), 3, 3)
 		pSelectObject.Call(hdc, o)
 		pDeleteObject.Call(br)
+		p += barW + gap
 	}
-
-	// spinner: 270° arc rotating at 1.1 rev/s
-	if spinA > 0.001 {
-		r := 7.5 * (0.7 + 0.3*spinA)
-		start := math.Mod(-t*396.0, 360.0) * math.Pi / 180
-		end := start - 270*math.Pi/180
-		p := pen(blend(rgb(120, 170, 255), bgc, spinA), 2)
-		o, _, _ := pSelectObject.Call(hdc, p)
-		nb, _, _ := pGetStockObject.Call(nullBrush)
-		ob, _, _ := pSelectObject.Call(hdc, nb)
-		pSetArcDirection.Call(hdc, adCounterClock)
-		pArc.Call(hdc,
-			uintptr(int32(cx-r)), uintptr(int32(cy-r)), uintptr(int32(cx+r)), uintptr(int32(cy+r)),
-			uintptr(int32(cx+r*math.Cos(end))), uintptr(int32(cy-r*math.Sin(end))),
-			uintptr(int32(cx+r*math.Cos(start))), uintptr(int32(cy-r*math.Sin(start))))
-		pSelectObject.Call(hdc, ob)
-		pSelectObject.Call(hdc, o)
-		pDeleteObject.Call(p)
-	}
-
-	// check / cross
-	if markA > 0.001 {
-		var color uintptr
-		switch st {
-		case Pasted:
-			color = rgb(62, 207, 142)
-		case Error:
-			color = rgb(255, 92, 92)
-		default:
-			color = rgb(158, 158, 158)
-		}
-		p := pen(blend(color, bgc, clamp01(markA*2)), 2)
-		o, _, _ := pSelectObject.Call(hdc, p)
-		line := func(x0, y0, x1, y1 float64) {
-			pMoveToEx.Call(hdc, uintptr(int32(x0)), uintptr(int32(y0)), 0)
-			pLineTo.Call(hdc, uintptr(int32(x1)), uintptr(int32(y1)))
-		}
-		if st == Pasted {
-			// GDI y grows downward, so the check is flipped relative to Cocoa.
-			ax, ay := cx-6.5, cy-0.5
-			mx, my := cx-2.0, cy+4.0
-			zx, zy := cx+6.5, cy-5.0
-			s1 := clamp01(markA / 0.4)
-			s2 := clamp01((markA - 0.4) / 0.6)
-			line(ax, ay, ax+(mx-ax)*s1, ay+(my-ay)*s1)
-			if s2 > 0 {
-				line(mx, my, mx+(zx-mx)*s2, my+(zy-my)*s2)
-			}
-		} else {
-			k := 5.0 * markA
-			line(cx-k, cy-k, cx+k, cy+k)
-			line(cx-k, cy+k, cx+k, cy-k)
-		}
-		pSelectObject.Call(hdc, o)
-		pDeleteObject.Call(p)
-	}
+	pSelectObject.Call(hdc, op)
 }
 
 func ensureWindow() {
@@ -305,18 +298,38 @@ func ensureWindow() {
 	pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	hwnd, _, _ = pCreateWindowExW.Call(
 		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
-		uintptr(unsafe.Pointer(cls)), 0, wsPopup, 0, 0, pillW, pillH, 0, 0, inst, 0)
-	rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, pillW+1, pillH+1, pillH, pillH)
-	pSetWindowRgn.Call(hwnd, rgn, 1)
+		uintptr(unsafe.Pointer(cls)), 0, wsPopup, 0, 0, pillLong, pillShort, 0, 0, inst, 0)
 	pSetLayeredWindowAttrs.Call(hwnd, 0, 0, lwaAlpha)
 }
 
+// reposition centres the pill on the chosen edge of the primary screen,
+// edgeGap px in from the physical edge, and sizes it for that orientation.
+// Must be called with mu held.
 func reposition() {
-	var work rect
-	pSystemParametersInfoW.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&work)), 0)
-	x := (work.left+work.right)/2 - pillW/2
-	y := work.bottom - bottomGap - pillH
-	pSetWindowPos.Call(hwnd, ^uintptr(0) /* HWND_TOPMOST */, uintptr(int32(x)), uintptr(int32(y)), pillW, pillH, 0x0010 /* SWP_NOACTIVATE */)
+	sw, _, _ := pGetSystemMetrics.Call(smCxScreen)
+	sh, _, _ := pGetSystemMetrics.Call(smCyScreen)
+	scrW, scrH := int32(sw), int32(sh)
+	winW, winH = pillLong, pillShort
+	if vertical() {
+		winW, winH = pillShort, pillLong
+	}
+	switch posCode {
+	case 1: // top
+		baseX, baseY = scrW/2-winW/2, edgeGap
+		inX, inY = 0, 1
+	case 2: // left
+		baseX, baseY = edgeGap, scrH/2-winH/2
+		inX, inY = 1, 0
+	case 3: // right
+		baseX, baseY = scrW-edgeGap-winW, scrH/2-winH/2
+		inX, inY = -1, 0
+	default: // bottom
+		baseX, baseY = scrW/2-winW/2, scrH-edgeGap-winH
+		inX, inY = 0, -1
+	}
+	pSetWindowPos.Call(hwnd, ^uintptr(0) /* HWND_TOPMOST */, uintptr(baseX), uintptr(baseY), uintptr(winW), uintptr(winH), swpNoActivate)
+	rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(winW+1), uintptr(winH+1), pillShort, pillShort)
+	pSetWindowRgn.Call(hwnd, rgn, 1)
 }
 
 // Show makes the pill visible in the given state (text is ignored).
@@ -325,18 +338,28 @@ func Show(s State, _ string) {
 		ensureWindow()
 		mu.Lock()
 		fresh := state == Hidden || !hideAt.IsZero()
+		if fresh && terminal(s) {
+			// Nothing to show: success/cancel have no look of their own.
+			mu.Unlock()
+			return
+		}
 		state, stateAt = s, time.Now()
 		hideAt = time.Time{}
 		if fresh {
 			shownAt = time.Now()
+			lastTick = time.Time{}
 			level, target = 0, 0
+			collapse, red, shimmer = 1, 0, 0
+			if s == Listening {
+				collapse = 0
+			}
 			for i := range bars {
 				bars[i] = 0
 			}
+			reposition()
 		}
 		mu.Unlock()
 		if fresh {
-			reposition()
 			pSetLayeredWindowAttrs.Call(hwnd, 0, 0, lwaAlpha)
 			pShowWindow.Call(hwnd, swShowNoActivate)
 		}
@@ -345,7 +368,8 @@ func Show(s State, _ string) {
 	})
 }
 
-// SetState changes appearance without repositioning.
+// SetState changes appearance without repositioning. Pasted and Cancelled
+// start the fade-out immediately; Error pulses red twice and then fades.
 func SetState(s State, t string) {
 	mainloop.Dispatch(func() {
 		mu.Lock()
@@ -358,6 +382,9 @@ func SetState(s State, t string) {
 		mu.Lock()
 		state, stateAt = s, time.Now()
 		hideAt = time.Time{}
+		if terminal(s) {
+			hideAt = stateAt
+		}
 		mu.Unlock()
 		pSetTimer.Call(hwnd, 1, 16, 0)
 		pInvalidateRect.Call(hwnd, 0, 0)
@@ -371,12 +398,17 @@ func SetLevel(l float64) {
 	mu.Unlock()
 }
 
-// Hide fades the pill out.
+// Hide fades the pill out; a failure finishes its two pulses first.
 func Hide() {
 	mainloop.Dispatch(func() {
 		mu.Lock()
 		if hwnd != 0 && state != Hidden && hideAt.IsZero() {
 			hideAt = time.Now()
+			if state == Error {
+				if end := stateAt.Add(time.Duration(errorHold * float64(time.Second))); end.After(hideAt) {
+					hideAt = end
+				}
+			}
 		}
 		mu.Unlock()
 	})

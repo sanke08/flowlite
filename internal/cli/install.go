@@ -1,34 +1,13 @@
 package cli
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/spf13/cobra"
 )
-
-var installCmd = &cobra.Command{
-	Use:   "install",
-	Short: "Copy this binary onto your PATH so `flowlite` works from anywhere",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		dest, err := installSelf()
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%s installed to %s\n", ok("✓"), dest)
-		if !onPath(filepath.Dir(dest)) {
-			fmt.Println(warn("  " + filepath.Dir(dest) + " is not on your PATH yet."))
-			fmt.Println(dim("  add this line to ~/.zshrc, then open a new terminal:"))
-			fmt.Printf("    export PATH=\"%s:$PATH\"\n", filepath.Dir(dest))
-		}
-		return nil
-	},
-}
 
 // installDir picks the first writable, conventional bin directory.
 func installDir() string {
@@ -99,6 +78,8 @@ func sameFile(a, b string) (bool, error) {
 	return os.SameFile(fa, fb), nil
 }
 
+func dirOf(p string) string { return filepath.Dir(p) }
+
 func onPath(dir string) bool {
 	for _, p := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
 		if p == dir {
@@ -116,9 +97,4 @@ func runningFromPath() bool {
 	}
 	exe, _ = filepath.EvalSymlinks(exe)
 	return onPath(filepath.Dir(exe))
-}
-
-
-func init() {
-	rootCmd.AddCommand(installCmd)
 }

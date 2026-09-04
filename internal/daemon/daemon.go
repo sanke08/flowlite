@@ -15,6 +15,7 @@ import (
 	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
+	"github.com/sanke08/flowlite/internal/history"
 	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/inject"
 	"github.com/sanke08/flowlite/internal/mainloop"
@@ -55,12 +56,17 @@ type Daemon struct {
 	machine *hotkey.Machine
 	events  chan hotkey.KeyEvent
 	tap     *hotkey.Tap
+	hist    *history.Store // nil when the history file cannot be opened
 
 	mu    sync.Mutex
 	state State
 	// gen increments on every pill Show; a delayed Hide only fires if no
 	// newer dictation has taken the pill over in the meantime.
 	gen atomic.Uint64
+	// pillUp is true from Show until the matching Hide. A recording that was
+	// never confirmed (a lone tap) has no pill, so finish must raise one
+	// before setting its state.
+	pillUp atomic.Bool
 
 	busy sync.Mutex // serialises transcriptions
 
@@ -105,6 +111,14 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 		logger.Printf("sounds disabled: %v", err)
 	}
 
+	hist, err := history.Open()
+	if err != nil {
+		logger.Printf("history disabled: %v", err)
+	}
+
+	// Pin the pill to the configured screen edge before it is ever shown.
+	overlay.SetPosition(cfg.PillPosition)
+
 	d := &Daemon{
 		cfg:     cfg,
 		log:     logger,
@@ -113,6 +127,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 		player:  player,
 		machine: hotkey.New(time.Duration(cfg.HoldThresholdMS) * time.Millisecond),
 		events:  make(chan hotkey.KeyEvent, 64),
+		hist:    hist,
 	}
 	return d, nil
 }
@@ -126,7 +141,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if tapErr != nil {
 		return tapErr
 	}
-	d.log.Printf("listening — tap %s to start/stop, hold it to dictate, Esc to cancel",
+	d.log.Printf("listening — hold %s to talk, double-tap for hands-free (tap to stop), triple-tap to paste the last transcript, Esc to cancel",
 		hotkey.Label(d.cfg.Hotkey))
 
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -180,28 +195,47 @@ func (d *Daemon) State() State { return d.getState() }
 // ---- gestures -----------------------------------------------------------
 
 func (d *Daemon) handle(ev hotkey.KeyEvent) {
-	var e hotkey.Event
+	// Let time settle any pending gesture first so a press is judged
+	// against an up-to-date machine (a tick may be up to 50 ms late).
+	d.act(d.machine.Expire())
 	if ev.Down {
-		e = d.machine.Press(ev.Kind)
+		d.act(d.machine.Press(ev.Kind))
 	} else {
-		e = d.machine.Release(ev.Kind)
+		d.act(d.machine.Release(ev.Kind))
 	}
+}
+
+func (d *Daemon) act(e hotkey.Event) {
 	switch e {
 	case hotkey.Start:
 		d.start()
+	case hotkey.HoldConfirmed, hotkey.StartHandsFree:
+		d.confirm()
 	case hotkey.Finish:
 		d.finish()
+	case hotkey.PasteLast:
+		d.pasteLast()
+	case hotkey.Discard:
+		d.discard()
 	case hotkey.Cancel:
 		d.cancel()
 	}
 }
 
+// start opens the microphone the instant the key goes down. The gesture is
+// not known yet, so this is silent: no sound and no pill until confirm.
 func (d *Daemon) start() {
-	if d.getState() != Idle {
-		// Still transcribing the last one; the machine already moved on, so
+	switch d.getState() {
+	case Transcribing:
+		// Still busy with the last one; the machine already moved on, so
 		// put it back rather than leave it believing a session is open.
 		d.machine.Reset()
 		return
+	case Recording:
+		// A stale, never-confirmed recording (the machine missed an
+		// Expire); replace it with this fresh gesture.
+		d.rec.Cancel()
+		d.setState(Idle)
 	}
 	if err := d.rec.Start(); err != nil {
 		d.log.Printf("microphone: %v", err)
@@ -212,6 +246,16 @@ func (d *Daemon) start() {
 		return
 	}
 	d.setState(Recording)
+}
+
+// confirm is the moment a hold or a double-tap makes the recording real:
+// the Start cue plays and the pill appears. Audio captured since the first
+// key-down is already in the recorder.
+func (d *Daemon) confirm() {
+	if d.getState() != Recording {
+		d.machine.Reset()
+		return
+	}
 	d.player.Play(sound.Start)
 	d.show(overlay.Listening, "")
 }
@@ -223,6 +267,9 @@ func (d *Daemon) finish() {
 	samples := d.rec.Stop()
 	d.setState(Transcribing)
 	d.player.Play(sound.Stop)
+	if !d.pillUp.Load() {
+		d.show(overlay.Listening, "")
+	}
 
 	if !speech.HasSpeech(samples) {
 		d.settle(overlay.Cancelled, "Nothing heard", sound.Cancel, holdCancelled)
@@ -233,13 +280,70 @@ func (d *Daemon) finish() {
 	go d.transcribe(samples)
 }
 
+// discard drops a recording nobody was told about: a lone tap, or Esc
+// before the gesture was confirmed. No sound, no pill.
+func (d *Daemon) discard() {
+	if d.getState() != Recording {
+		return
+	}
+	d.rec.Cancel()
+	d.setState(Idle)
+}
+
 func (d *Daemon) cancel() {
 	if d.getState() != Recording {
 		return
 	}
 	d.rec.Cancel()
 	d.setState(Transcribing) // block a new start until the pill settles
+	if !d.pillUp.Load() {
+		d.show(overlay.Listening, "")
+	}
 	d.settle(overlay.Cancelled, "Cancelled", sound.Cancel, holdCancelled)
+}
+
+// pasteLast is the triple tap: paste the previous transcript again, for
+// when the last one landed nowhere because no field had focus.
+func (d *Daemon) pasteLast() {
+	switch d.getState() {
+	case Transcribing:
+		return // the pill is busy; the machine is already idle
+	case Recording:
+		d.rec.Cancel() // the sliver captured during the taps
+	}
+	d.setState(Transcribing) // hold off a new start until the pill settles
+
+	var last history.Entry
+	var ok bool
+	if d.hist != nil {
+		last, ok = d.hist.Last()
+	}
+	if !ok {
+		d.show(overlay.Error, "Nothing to paste yet")
+		d.player.Play(sound.Error)
+		d.hideAfter(holdError)
+		d.setState(Idle)
+		return
+	}
+	label := "Pasted again"
+	if d.NoPaste {
+		label = "Last transcript"
+		if d.Transcribed != nil {
+			d.Transcribed(last.Text, last.AudioSeconds, 0)
+		}
+	} else if err := inject.Paste(last.Text, d.cfg.RestoreClipboard); err != nil {
+		d.log.Printf("paste failed: %v", err)
+		d.show(overlay.Error, "Paste failed")
+		d.player.Play(sound.Error)
+		d.hideAfter(holdError)
+		d.setState(Idle)
+		return
+	}
+	d.log.Printf("pasted last transcript again (%d chars)", len(last.Text))
+	d.show(overlay.Pasted, label)
+	d.player.Play(sound.Done)
+	d.hideAfter(holdPasted)
+	d.setState(Idle)
 }
 
 func (d *Daemon) transcribe(samples []float32) {
@@ -263,10 +367,18 @@ func (d *Daemon) transcribe(samples []float32) {
 	secs := float64(len(samples)) / audio.SampleRate
 
 	label := "Pasted"
+	pasted := false
+	var pasteErr error
 	if d.NoPaste {
 		label = "Transcribed"
-	} else if err := inject.Paste(text, d.cfg.RestoreClipboard); err != nil {
-		d.log.Printf("paste failed: %v", err)
+	} else if pasteErr = inject.Paste(text, d.cfg.RestoreClipboard); pasteErr == nil {
+		pasted = true
+	}
+	// Every transcript is remembered, pasted or not, so a triple tap or
+	// `flowlite last` can recover it.
+	d.remember(history.Entry{Time: time.Now(), Text: text, Pasted: pasted, AudioSeconds: secs})
+	if pasteErr != nil {
+		d.log.Printf("paste failed: %v", pasteErr)
 		d.settle(overlay.Error, "Paste failed", sound.Error, holdError)
 		return
 	}
@@ -286,8 +398,18 @@ func (d *Daemon) settle(s overlay.State, text string, cue sound.Cue, hold time.D
 	d.setState(Idle)
 }
 
+func (d *Daemon) remember(e history.Entry) {
+	if d.hist == nil {
+		return
+	}
+	if err := d.hist.Append(e); err != nil {
+		d.log.Printf("history: %v", err)
+	}
+}
+
 func (d *Daemon) show(s overlay.State, text string) {
 	d.gen.Add(1)
+	d.pillUp.Store(true)
 	overlay.Show(s, text)
 }
 
@@ -295,16 +417,22 @@ func (d *Daemon) hideAfter(delay time.Duration) {
 	g := d.gen.Load()
 	time.AfterFunc(delay, func() {
 		if d.gen.Load() == g {
+			d.pillUp.Store(false)
 			overlay.Hide()
 		}
 	})
 }
 
 func (d *Daemon) tick() {
+	// Time is what tells a tap from a hold and a lone tap from the start
+	// of a double-tap; the machine finds out here.
+	d.act(d.machine.Expire())
 	if d.getState() != Recording {
 		return
 	}
-	overlay.SetLevel(d.rec.Level())
+	if d.pillUp.Load() {
+		overlay.SetLevel(d.rec.Level())
+	}
 	if d.rec.Duration() >= float64(d.cfg.MaxSeconds) || d.rec.Overflowed() {
 		d.log.Printf("max duration (%ds) reached; stopping", d.cfg.MaxSeconds)
 		d.machine.Reset()

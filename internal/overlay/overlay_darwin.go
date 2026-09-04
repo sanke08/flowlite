@@ -7,6 +7,7 @@ package overlay
 #cgo LDFLAGS: -framework Cocoa -framework QuartzCore
 #include <stdlib.h>
 #include <stdbool.h>
+void flowlite_overlay_set_position(int pos);
 void flowlite_overlay_show(int state, const char *text);
 void flowlite_overlay_set_state(int state, const char *text);
 void flowlite_overlay_set_level(float level);
@@ -22,8 +23,13 @@ import (
 	"github.com/sanke08/flowlite/internal/mainloop"
 )
 
+func applyPosition(code int) {
+	mainloop.Dispatch(func() { C.flowlite_overlay_set_position(C.int(code)) })
+}
+
 // Show makes the pill visible in the given state. Main-thread work is
-// dispatched; callers may be on any goroutine.
+// dispatched; callers may be on any goroutine. The text is ignored: the pill
+// never shows words.
 func Show(s State, text string) {
 	mainloop.Dispatch(func() {
 		c := C.CString(text)
@@ -32,7 +38,8 @@ func Show(s State, text string) {
 	})
 }
 
-// SetState changes appearance without repositioning.
+// SetState changes appearance without repositioning. Pasted and Cancelled
+// start the fade-out immediately; Error pulses red twice and then fades.
 func SetState(s State, text string) {
 	mainloop.Dispatch(func() {
 		c := C.CString(text)
@@ -46,7 +53,7 @@ func SetLevel(level float64) {
 	mainloop.Dispatch(func() { C.flowlite_overlay_set_level(C.float(level)) })
 }
 
-// Hide removes the pill.
+// Hide fades the pill out.
 func Hide() {
 	mainloop.Dispatch(func() { C.flowlite_overlay_hide() })
 }

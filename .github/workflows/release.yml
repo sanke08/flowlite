@@ -1,0 +1,90 @@
+# Automatic releases.
+#
+# Push to main. If the VERSION file names a version that has no git tag yet,
+# this builds the self-contained macOS binary and the Windows zip on GitHub's
+# machines, creates the tag and a GitHub Release with both attached plus a
+# SHA256SUMS file. The curl installer and `flowlite update` pick it up at once.
+#
+# Pushes that do not change VERSION release nothing. Free for public repos.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish v${{ steps.ver.outputs.version }}
+    runs-on: macos-14   # Apple Silicon runner; Metal is compiled in, not needed at build time
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are needed to decide whether this version is new
+
+      - name: Read VERSION and decide
+        id: ver
+        run: |
+          V="v$(tr -d ' \n' < VERSION)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$V" >/dev/null; then
+            echo "release=no"  >> "$GITHUB_OUTPUT"
+            echo "$V is already released — nothing to do."
+          else
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+            echo "$V is new — building."
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.ver.outputs.release == 'yes'
+        with:
+          go-version-file: go.mod
+
+      - name: Native build tools
+        if: steps.ver.outputs.release == 'yes'
+        run: brew install cmake mingw-w64
+
+      - name: Tag first, so the binary reports the exact version
+        if: steps.ver.outputs.release == 'yes'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.version }}" -m "FlowLite ${{ steps.ver.outputs.version }}"
+
+      - name: Tests
+        if: steps.ver.outputs.release == 'yes'
+        run: |
+          brew install whisper-cpp   # the dev build links against it
+          go vet ./... && go test ./...
+
+      - name: macOS binary (static whisper.cpp, Metal embedded, macOS 13+)
+        if: steps.ver.outputs.release == 'yes'
+        run: make release
+
+      - name: Windows zip (cross-linked)
+        if: steps.ver.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-windows-deps.sh && make windows
+
+      - name: Checksums
+        if: steps.ver.outputs.release == 'yes'
+        run: cd dist && shasum -a 256 flowlite-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        if: steps.ver.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          git push origin "$V"
+          gh release create "$V" dist/flowlite-*-macos-arm64 dist/flowlite-*-windows-x64.zip dist/SHA256SUMS \
+            --title "FlowLite $V" --notes-file release-notes.md
+          echo "published https://github.com/${{ github.repository }}/releases/tag/$V"

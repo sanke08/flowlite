@@ -5,40 +5,28 @@ import (
 	"os"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
+	"github.com/sanke08/flowlite/internal/config"
 	"github.com/sanke08/flowlite/internal/speech"
 	"github.com/sanke08/flowlite/internal/whisper"
 )
 
-var (
-	testSeconds int
-	testFile    string
-)
+// testSeconds is how long settings → Test microphone records.
+const testSeconds = 4
 
-var testCmd = &cobra.Command{
-	Use:   "test",
-	Short: "Record a few seconds (or read a WAV) and print the transcript — no hotkey, no paste",
-	Long: `Proves the microphone → model → text pipeline on its own, with none of the
-hotkey or permission machinery in the way. If this works and the hotkey does
-not, the problem is the Accessibility permission (see: flowlite doctor).`,
-	RunE: runTest,
-}
-
-func runTest(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
+// testMicrophone proves the microphone → model → text pipeline on its own,
+// with none of the hotkey or permission machinery in the way. If this works
+// and the hotkey does not, the problem is the Accessibility permission.
+func testMicrophone(cfg *config.Config) error {
 	m, have := catalog.Get(cfg.Model)
 	if !have || !m.Downloaded() {
-		return fmt.Errorf("no model installed — run: flowlite setup")
+		return fmt.Errorf("no model installed — choose one under Speech model first")
 	}
 	path, _ := m.Path()
 
-	fmt.Printf("loading %s… ", m.Label)
+	spin := startSpinner("loading " + m.Label + "…")
+	defer spin.Stop() // no-op after Done; matters only on the error returns
 	t0 := time.Now()
 	model, err := whisper.Load(path)
 	if err != nil {
@@ -52,45 +40,34 @@ func runTest(cmd *cobra.Command, args []string) error {
 	if whisper.UsingMetal() {
 		dev = "Metal GPU, " + whisper.GPUName()
 	}
-	fmt.Printf("%s (%s, %s)\n", ok("ready"), dev, time.Since(t0).Round(time.Millisecond))
+	spin.Done(fmt.Sprintf("loading %s… %s (%s, %s)", m.Label, ok("ready"), dev, time.Since(t0).Round(time.Millisecond)))
 
-	var samples []float32
-	if testFile != "" {
-		s, rate, err := audio.ReadWAV(testFile)
-		if err != nil {
-			return err
-		}
-		if rate != audio.SampleRate {
-			return fmt.Errorf("%s is %d Hz; FlowLite needs 16000 Hz mono 16-bit WAV", testFile, rate)
-		}
-		samples = s
-		fmt.Printf("read %s (%.1fs)\n", testFile, float64(len(s))/audio.SampleRate)
-	} else {
-		rec := audio.NewRecorder(cfg.InputDevice, testSeconds+1)
-		fmt.Printf("recording for %ds — speak now\n", testSeconds)
-		if err := rec.Start(); err != nil {
-			return err
-		}
-		deadline := time.Now().Add(time.Duration(testSeconds) * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
-			fmt.Fprintf(os.Stderr, "\r  %s %4.1fs  ", meter(rec.Level()), time.Until(deadline).Seconds())
-		}
-		samples = rec.Stop()
-		fmt.Fprintln(os.Stderr, "\r                                      ")
+	rec := audio.NewRecorder(cfg.InputDevice, testSeconds+1)
+	fmt.Printf("recording for %ds — speak now\n", testSeconds)
+	if err := rec.Start(); err != nil {
+		return err
 	}
+	deadline := time.Now().Add(testSeconds * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprintf(os.Stderr, "\r  %s %4.1fs  ", meter(rec.Level()), time.Until(deadline).Seconds())
+	}
+	samples := rec.Stop()
+	fmt.Fprintln(os.Stderr, "\r                                      ")
 
 	if !speech.HasSpeech(samples) {
 		fmt.Println(warn("nothing heard") + dim(" — the level gate rejected the audio as silence/noise"))
 		return nil
 	}
 
+	spin = startSpinner("transcribing…")
 	t0 = time.Now()
 	segs, err := model.Transcribe(samples, whisper.Options{Language: cfg.Language})
+	took := time.Since(t0)
+	spin.Stop()
 	if err != nil {
 		return err
 	}
-	took := time.Since(t0)
 	text := speech.Finalise(segs)
 	secs := float64(len(samples)) / audio.SampleRate
 	fmt.Printf("%s %.1fs of audio in %s (%.1fx realtime)\n", ok("transcribed"), secs, took.Round(time.Millisecond), secs/took.Seconds())
@@ -118,10 +95,4 @@ func meter(level float64) string {
 		}
 	}
 	return string(s)
-}
-
-func init() {
-	testCmd.Flags().IntVar(&testSeconds, "seconds", 4, "how long to record")
-	testCmd.Flags().StringVar(&testFile, "file", "", "transcribe this 16 kHz mono WAV instead of recording")
-	rootCmd.AddCommand(testCmd)
 }

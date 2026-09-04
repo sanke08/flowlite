@@ -195,7 +195,7 @@ func (m *Model) Transcribe(samples []float32, opt Options) ([]string, error) {
 	p.n_threads = C.int(threads)
 	p.language = clang
 	p.detect_language = C.bool(false)
-	p.no_context = C.bool(true)   // each dictation is independent
+	p.no_context = C.bool(true) // each dictation is independent
 	p.single_segment = C.bool(false)
 	p.suppress_nst = C.bool(true) // drop "(door closes)" style tokens
 	p.print_progress = C.bool(false)

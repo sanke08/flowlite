@@ -1,8 +1,13 @@
-// Package cli is the whole user interface: every setting, every check and the
-// daemon itself are reached from the `flowlite` command.
+// Package cli is the whole user interface. There are four commands:
+//
+//	flowlite           start dictating (runs setup the first time)
+//	flowlite settings  one menu for everything you can change
+//	flowlite doctor    check what FlowLite needs and how to fix it
+//	flowlite update    fetch the latest release
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,18 +15,25 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
-	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/permissions"
 )
 
-// Version is set by the Makefile from git describe.
-var Version = "dev"
+// Set by the Makefile via -ldflags -X (see LDFLAGS there). The names are part
+// of the build contract: internal/cli.Version, .Commit, .BuildDate,
+// .WhisperVersion.
+var (
+	Version        = "dev"
+	Commit         = "unknown"
+	BuildDate      = "unknown"
+	WhisperVersion = "unknown"
+)
 
 var (
 	bold = lipgloss.NewStyle().Bold(true).Render
@@ -32,25 +44,44 @@ var (
 	blue = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render
 )
 
+// Hidden root flags: plumbing that used to be commands. They exist so that
+// `settings` can spawn a subprocess for things that need the AppKit main
+// loop (the pill) or the audio device, and so the background daemon has a
+// re-exec target. Users never type them.
+var (
+	rootDaemon      bool   // background re-exec target: log to file, no banner
+	rootPillPreview string // show the pill at this edge for ~3 s, then exit
+	rootPlayCues    bool   // play the six audio cues, then exit
+	rootNoPaste     bool   // user-facing: print transcripts instead of pasting
+)
+
+// errSilent is returned when everything worth saying has already been
+// printed; Execute exits 1 without adding an "error:" line.
+var errSilent = errors.New("")
+
 var rootCmd = &cobra.Command{
 	Use:   "flowlite",
 	Short: "Press a key, speak, and the words appear where your cursor is — all on this machine.",
 	Long: `FlowLite is local, free speech-to-text.
 
-Tap the dictation key to start and stop, or hold it to dictate while pressed.
-Nothing leaves your computer: the model runs here, and the only download is
-the model itself.
+Run it and leave it running: hold the dictation key to talk, or double-tap it
+to dictate hands-free and tap once to stop. Triple-tap to paste your last
+transcript again. Nothing leaves your computer.
 
-Start with:  flowlite setup`,
+The first run walks you through setup.`,
+	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Version:       Version,
-	RunE:          runStatus,
+	RunE:          runRoot,
 }
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
+		if errors.Is(err, errSilent) {
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, bad("error:"), err)
 		return 1
 	}
@@ -63,6 +94,124 @@ func loadConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("reading settings: %w", err)
 	}
 	return cfg, nil
+}
+
+// runRoot is bare `flowlite`: do the one thing standing between the user and
+// dictating, then dictate. The branches are tried top to bottom and the
+// first that fires decides.
+func runRoot(cmd *cobra.Command, args []string) error {
+	// Plumbing flags first; they are complete commands in themselves.
+	if rootPillPreview != "" {
+		return pillPreview(rootPillPreview)
+	}
+	if rootPlayCues {
+		return playCues()
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !rootDaemon
+
+	// 1. Not on PATH: offer to put it there so `flowlite` works from any
+	// terminal from now on.
+	if interactive && !runningFromPath() {
+		if err := offerInstall(); err != nil {
+			return err
+		}
+	}
+
+	// 2. Not configured: the setup wizard, then carry on without making the
+	// user type anything again.
+	if !configured(cfg) {
+		if !interactive {
+			return errors.New("not set up yet — run flowlite in a terminal once to choose a model")
+		}
+		if err := runSetup(cfg); err != nil {
+			return err
+		}
+		fmt.Println()
+	}
+
+	// 3. Keyboard permission missing: say exactly what to do and stop. A
+	// daemon that cannot see the keyboard is only a support ticket.
+	if permissions.Needed() && !permissions.Trusted() {
+		fmt.Println(bad("Accessibility is NOT granted to " + hostApp() + "."))
+		printAccessibilityFix(false)
+		return errSilent
+	}
+
+	// 4. Already running: never start a second instance — two listeners
+	// means two pastes per dictation.
+	if pid, running := daemonRunning(); running {
+		fmt.Printf("FlowLite is already listening (pid %d).\n", pid)
+		fmt.Println(dim("  stop it with Ctrl+C in that window, or:  flowlite settings → Background daemon → Stop"))
+		return nil
+	}
+
+	// 5. Dictate.
+	return runDaemon(cfg, rootDaemon, rootNoPaste)
+}
+
+// configured reports whether setup has finished: a model is chosen and its
+// file is actually on disk (an interrupted download leaves the first true and
+// the second false).
+func configured(cfg *config.Config) bool {
+	if !cfg.Configured() {
+		return false
+	}
+	m, have := catalog.Get(cfg.Model)
+	return have && m.Downloaded()
+}
+
+// offerInstall is step 1 of the root decision tree: copy the binary onto
+// PATH if the user agrees. Declining is fine; nothing else depends on it.
+func offerInstall() error {
+	doInstall := true
+	if err := huh.NewConfirm().
+		Title("Install flowlite so it works from any terminal?").
+		Description("Copies this file to " + installDir()).
+		Affirmative("Yes").Negative("Skip").Value(&doInstall).Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return err
+	}
+	if !doInstall {
+		return nil
+	}
+	dest, err := installSelf()
+	if err != nil {
+		fmt.Println(warn("  install skipped: " + err.Error()))
+		return nil
+	}
+	fmt.Printf("%s installed to %s\n", ok("✓"), dest)
+	if dir := dirOf(dest); !onPath(dir) {
+		fmt.Println(dim("  add to ~/.zshrc, then open a new terminal:  export PATH=\"" + dir + ":$PATH\""))
+	}
+	fmt.Println()
+	return nil
+}
+
+// printAccessibilityFix prints the numbered steps that get the keyboard
+// permission granted. requested is true when the macOS prompt was just
+// triggered, so step 1 reads as done.
+func printAccessibilityFix(requested bool) {
+	fmt.Println()
+	fmt.Println("     Without it macOS never delivers the dictation key to FlowLite, so")
+	fmt.Println("     pressing it does nothing at all. This is the step most people miss.")
+	fmt.Println()
+	if !requested {
+		fmt.Println("       1.", blue("flowlite doctor --request"), dim("— opens the macOS prompt and adds "+hostApp()+" to the list"))
+	} else {
+		fmt.Println("       1.", dim("a macOS prompt should have appeared; it added "+hostApp()+" to the list"))
+	}
+	fmt.Println("       2. System Settings → Privacy & Security → Accessibility → switch on", bold(hostApp()))
+	fmt.Println("       3. quit and reopen", bold(hostApp())+", then run:", blue("flowlite"), dim("(flowlite doctor confirms it)"))
+	fmt.Println()
+	fmt.Println(dim("     The permission attaches to " + hostApp() + " — the app that launched flowlite —"))
+	fmt.Println(dim("     not to the flowlite binary, so it survives every update."))
 }
 
 // hostApp names the application macOS attributes our permissions to: the
@@ -121,60 +270,23 @@ func parentApp() string {
 	return ""
 }
 
-// runStatus is `flowlite` with no arguments: where things stand, and the one
-// thing to do next.
-func runStatus(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
+func shortenHome(p string) string {
+	if h, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, h) {
+		return "~" + p[len(h):]
 	}
-	// A freshly downloaded binary, double-clicked or run once: go straight
-	// into setup instead of printing a status page nobody asked for.
-	if !cfg.Configured() && term.IsTerminal(int(os.Stdin.Fd())) {
-		return runSetup(cmd, args)
-	}
-	fmt.Println(bold("FlowLite"), dim(Version))
-	fmt.Println()
-
-	m, have := catalog.Get(cfg.Model)
-	switch {
-	case !have:
-		fmt.Printf("  model      %s\n", warn("none chosen"))
-	case !m.Downloaded():
-		fmt.Printf("  model      %s %s\n", m.Label, warn("(not downloaded)"))
-	default:
-		fmt.Printf("  model      %s %s\n", m.Label, dim(catalog.Human(m.DiskBytes())))
-	}
-	fmt.Printf("  key        %s %s\n", hotkey.Label(cfg.Hotkey), dim("tap to toggle · hold to talk · Esc cancels"))
-
-	trusted := permissions.Trusted()
-	if permissions.Needed() {
-		if trusted {
-			fmt.Printf("  keyboard   %s %s\n", ok("allowed"), dim("Accessibility granted to "+hostApp()))
-		} else {
-			fmt.Printf("  keyboard   %s %s\n", bad("blocked"), dim("Accessibility not granted to "+hostApp()))
-		}
-	}
-
-	if pid, running := daemonRunning(); running {
-		fmt.Printf("  daemon     %s %s\n", ok("running"), dim(fmt.Sprintf("pid %d", pid)))
-	} else {
-		fmt.Printf("  daemon     %s\n", dim("not running"))
-	}
-	extraModelsWarning()
-
-	fmt.Println()
-	switch {
-	case !have || !m.Downloaded():
-		fmt.Println("  next:", blue("flowlite setup"))
-	case permissions.Needed() && !trusted:
-		fmt.Println("  next:", blue("flowlite doctor"), dim("— the keyboard permission is the only thing missing"))
-	default:
-		fmt.Println("  next:", blue("flowlite run"), dim("— then tap "+hotkey.Label(cfg.Hotkey)+" in any text field"))
-	}
-	return nil
+	return p
 }
 
 func init() {
 	rootCmd.SetVersionTemplate("flowlite {{.Version}}\n")
+	rootCmd.CompletionOptions.HiddenDefaultCmd = true
+
+	f := rootCmd.Flags()
+	f.BoolVar(&rootNoPaste, "no-paste", false, "print transcripts here instead of pasting them (safe for trying it out)")
+	f.BoolVar(&rootDaemon, "daemon", false, "internal: background daemon — log to file, no banner")
+	f.StringVar(&rootPillPreview, "pill-preview", "", "internal: show the pill at this edge for a few seconds")
+	f.BoolVar(&rootPlayCues, "play-cues", false, "internal: play the audio cues")
+	_ = f.MarkHidden("daemon")
+	_ = f.MarkHidden("pill-preview")
+	_ = f.MarkHidden("play-cues")
 }
