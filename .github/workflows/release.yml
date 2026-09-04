@@ -1,16 +1,23 @@
 # Automatic releases.
 #
-# Push to main. If the VERSION file names a version that has no git tag yet,
-# this builds the self-contained macOS binary and the Windows zip on GitHub's
-# machines, creates the tag and a GitHub Release with both attached plus a
+# Every push to main that touches actual code builds the self-contained macOS
+# binary and the Windows zip on GitHub's machines, bumps VERSION's patch
+# number, creates the tag and a GitHub Release with both attached plus a
 # SHA256SUMS file. The curl installer and `flowlite update` pick it up at once.
 #
-# Pushes that do not change VERSION release nothing. Free for public repos.
+# Pushes whose only change is VERSION itself (this workflow's own bump commit)
+# or a *.md file / workflow edit are ignored, so the bump commit doesn't
+# re-trigger itself and doc-only edits don't ship a release. Free for public
+# repos.
 name: Release
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "VERSION"
+      - "**.md"
+      - ".github/**"
   workflow_dispatch:
 
 permissions:
@@ -27,63 +34,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # tags are needed to decide whether this version is new
+          fetch-depth: 0   # tags are needed to compute the next version
 
-      - name: Read VERSION and decide
+      - name: Bump VERSION and tag, so the binary reports the exact version
         id: ver
         run: |
-          V="v$(tr -d ' \n' < VERSION)"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          if git rev-parse -q --verify "refs/tags/$V" >/dev/null; then
-            echo "release=no"  >> "$GITHUB_OUTPUT"
-            echo "$V is already released — nothing to do."
-          else
-            echo "release=yes" >> "$GITHUB_OUTPUT"
-            echo "$V is new — building."
-          fi
+          latest=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          latest=${latest:-v0.0.0}
+          IFS='.' read -r major minor patch <<< "${latest#v}"
+          next="v${major}.${minor}.$((patch + 1))"
+          echo "$next" is next, bumping from "$latest"
+
+          echo "${next#v}" > VERSION
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "$next"
+          git tag -a "$next" -m "FlowLite $next"
+
+          echo "version=$next" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
-        if: steps.ver.outputs.release == 'yes'
         with:
           go-version-file: go.mod
 
       - name: Native build tools
-        if: steps.ver.outputs.release == 'yes'
         run: brew install cmake mingw-w64
 
-      - name: Tag first, so the binary reports the exact version
-        if: steps.ver.outputs.release == 'yes'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.ver.outputs.version }}" -m "FlowLite ${{ steps.ver.outputs.version }}"
-
       - name: Tests
-        if: steps.ver.outputs.release == 'yes'
         run: |
           brew install whisper-cpp   # the dev build links against it
           go vet ./... && go test ./...
 
       - name: macOS binary (static whisper.cpp, Metal embedded, macOS 13+)
-        if: steps.ver.outputs.release == 'yes'
         run: make release
 
       - name: Windows zip (cross-linked)
-        if: steps.ver.outputs.release == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-windows-deps.sh && make windows
 
       - name: Checksums
-        if: steps.ver.outputs.release == 'yes'
         run: cd dist && shasum -a 256 flowlite-* > SHA256SUMS && cat SHA256SUMS
 
       - name: Publish
-        if: steps.ver.outputs.release == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.ver.outputs.version }}"
+          git push origin HEAD:main
           git push origin "$V"
           gh release create "$V" dist/flowlite-*-macos-arm64 dist/flowlite-*-windows-x64.zip dist/SHA256SUMS \
             --title "FlowLite $V" --notes-file release-notes.md
