@@ -1,9 +1,10 @@
-// Package cli is the whole user interface. There are four commands:
+// Package cli is the whole user interface. There are five commands:
 //
-//	flowlite           start dictating (runs setup the first time)
-//	flowlite settings  one menu for everything you can change
-//	flowlite doctor    check what FlowLite needs and how to fix it
-//	flowlite update    fetch the latest release
+//	flowlite            start dictating (runs setup the first time)
+//	flowlite settings   one menu for everything you can change
+//	flowlite doctor     check what FlowLite needs and how to fix it
+//	flowlite update     fetch the latest release
+//	flowlite uninstall  remove FlowLite completely
 package cli
 
 import (

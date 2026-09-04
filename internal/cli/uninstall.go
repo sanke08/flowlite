@@ -5,9 +5,27 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
 )
+
+var uninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove FlowLite completely: models, settings, history, log and the binary",
+	Args:  cobra.NoArgs,
+	RunE:  runUninstall,
+}
+
+func runUninstall(cmd *cobra.Command, args []string) error {
+	_, err := uninstallFlowLite()
+	return err
+}
+
+func init() {
+	rootCmd.AddCommand(uninstallCmd)
+}
 
 // uninstallFlowLite removes everything: models, settings, history, log and
 // the binary itself. It asks the user to type "yes" first. Returns true when
