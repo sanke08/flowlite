@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# PyInstaller intermediates
+build/
+dist/
+
+# Built installers.
+#
+# These are ignored on purpose. Each release is ~57 MB, and git keeps every
+# version forever — ten releases would add half a gigabyte to every clone.
+# The CI workflow attaches installers to GitHub Releases instead, which is
+# where people should download them from.
+#
+# If you would rather commit them anyway, delete the four lines below.
+app/v*/*.dmg
+app/v*/*.zip
+app/v*/*.exe
+app/v*/*.sha256
+
+# OS noise
+.DS_Store
+Thumbs.db
