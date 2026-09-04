@@ -13,7 +13,8 @@ and no audio is ever uploaded anywhere.
 - **Works everywhere** — anywhere you can type, FlowLite can paste
 
 > **Platforms:** macOS on Apple Silicon (M1 or newer) is supported and tested.
-> A Windows build exists but has not been tested yet — see [Windows](#windows-experimental).
+> A Windows build exists and has a one-line installer too, but has not been
+> tested on real hardware yet — see [Windows](#windows-experimental).
 
 There are only four commands to know:
 
@@ -47,6 +48,13 @@ one line:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sanke08/flowlite/main/install.sh | sh
 ```
+
+> On Windows, open **PowerShell** instead and paste:
+> ```powershell
+> irm https://raw.githubusercontent.com/sanke08/flowlite/main/install.ps1 | iex
+> ```
+> See [Windows (experimental)](#windows-experimental) — the Windows build is
+> untested on real hardware.
 
 What it does: downloads a single 12 MB program, puts it where your terminal
 can find it, and starts `flowlite`, which runs the setup wizard. If you'd
@@ -337,10 +345,18 @@ installed. Then remove Terminal from Accessibility if you like.
 
 The Windows version — keyboard hook, paste, and the pill — is written and
 compiles, but **has never been run on a Windows machine**. If you try it, you
-are the first. Download `flowlite-<version>-windows-x64.zip` from
+are the first. Open **PowerShell** and paste this one line:
+
+```powershell
+irm https://raw.githubusercontent.com/sanke08/flowlite/main/install.ps1 | iex
+```
+
+It downloads `flowlite-<version>-windows-x64.zip`, unzips it to
+`%LOCALAPPDATA%\FlowLite`, adds that folder to your user `PATH`, and starts
+`flowlite.exe`, which sets itself up the first time. No admin rights are
+needed. If you'd rather do it by hand, download the zip from
 [Releases](https://github.com/sanke08/flowlite/releases/latest), unzip it
-anywhere, keep the DLLs next to `flowlite.exe`, and run `flowlite.exe` — it
-sets itself up the first time. No special permissions are needed on Windows.
+anywhere, keep the DLLs next to `flowlite.exe`, and run `flowlite.exe`.
 The default key is Right Control.
 
 ---

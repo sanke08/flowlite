@@ -9,7 +9,7 @@ REPO="sanke08/flowlite"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) ASSET="macos-arm64" ;;
-  *) echo "FlowLite's one-line installer currently supports Apple Silicon Macs."; echo "Windows: download the zip from https://github.com/$REPO/releases"; exit 1 ;;
+  *) echo "FlowLite's one-line installer currently supports Apple Silicon Macs."; echo "Windows: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"; exit 1 ;;
 esac
 
 echo "FlowLite: finding the latest release…"
