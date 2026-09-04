@@ -24,3 +24,6 @@ app/v*/*.sha256
 # OS noise
 .DS_Store
 Thumbs.db
+
+# self-test report
+selftest.txt

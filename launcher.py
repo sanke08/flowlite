@@ -15,8 +15,22 @@ def self_test() -> int:
     Checks the things that break when an app is frozen but work fine from
     source — a missing SSL module, an engine whose native library did not get
     bundled, an unwritable model directory.
+
+    The report is written to selftest.txt as well as stdout, because a Windows
+    build is compiled without a console: sys.stdout is None there, so printing
+    is not merely invisible, it raises.
     """
     ok = True
+    lines: list[str] = []
+
+    def emit(line: str) -> None:
+        lines.append(line)
+        stream = sys.stdout or sys.__stdout__
+        if stream is not None:
+            try:
+                print(line, file=stream, flush=True)
+            except Exception:
+                pass
 
     def check(label, fn):
         nonlocal ok
@@ -24,11 +38,11 @@ def self_test() -> int:
             detail = fn()
         except Exception as exc:
             ok = False
-            print(f"  FAIL  {label}: {type(exc).__name__}: {exc}")
+            emit(f"  FAIL  {label}: {type(exc).__name__}: {exc}")
         else:
-            print(f"  ok    {label}{f': {detail}' if detail else ''}")
+            emit(f"  ok    {label}{f': {detail}' if detail else ''}")
 
-    print(f"FlowLite self-test (frozen={getattr(sys, 'frozen', False)})")
+    emit(f"FlowLite self-test (frozen={getattr(sys, 'frozen', False)})")
 
     def _ssl():
         import ssl
@@ -81,7 +95,16 @@ def self_test() -> int:
     check("model directory writable", _paths)
     check("clipboard", _clipboard)
 
-    print("PASS" if ok else "FAIL")
+    emit("PASS" if ok else "FAIL")
+
+    # Somewhere a CI step can read even when the build has no console.
+    try:
+        from pathlib import Path
+
+        Path("selftest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
     return 0 if ok else 1
 
 
