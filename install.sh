@@ -26,8 +26,12 @@ chmod +x "$TMP"
 rm -f "$TMP"
 
 echo
-if command -v flowlite >/dev/null 2>&1; then
-  exec flowlite setup
+# When piped through `sh`, stdin is the script itself, not the keyboard; the
+# interactive wizard needs the real terminal. FLOWLITE_NO_SETUP=1 skips it.
+if [ -n "${FLOWLITE_NO_SETUP:-}" ]; then
+  echo "Installed. Next:  flowlite setup"
+elif command -v flowlite >/dev/null 2>&1 && [ -r /dev/tty ]; then
+  exec flowlite setup < /dev/tty
 else
   echo "Open a new terminal and run:  flowlite setup"
 fi
