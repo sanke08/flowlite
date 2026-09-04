@@ -18,7 +18,7 @@
 #define PILL_LONG   100.0
 #define PILL_SHORT   30.0
 #define RADIUS       15.0
-#define EDGE_GAP    100.0
+#define EDGE_GAP     20.0
 #define BARS          9
 #define BAR_W         3.0
 #define BAR_GAP       3.0
