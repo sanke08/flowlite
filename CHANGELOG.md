@@ -3,6 +3,15 @@
 All notable changes to FlowLite. Versions follow [Semantic Versioning](https://semver.org):
 MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
+## [0.3.1] — 2026-09-05
+
+### Fixed
+- `flowlite version` now reports the real whisper.cpp version in release
+  builds instead of "homebrew".
+- The v0.2.1 release binary was built with a minimum macOS of 26 and would not
+  start on earlier systems; that release has been withdrawn. Builds from 0.3.0
+  on target macOS 13+.
+
 ## [0.3.0] — 2026-09-05
 
 ### Changed
