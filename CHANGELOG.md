@@ -3,6 +3,11 @@
 All notable changes to FlowLite. Versions follow [Semantic Versioning](https://semver.org):
 MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
+## [Unreleased]
+
+### Fixed
+- Installer shows a real progress readout (MB downloaded / total / percent) instead of curl's unknown-size animation.
+
 ## [0.3.1] — 2026-09-05
 
 ### Fixed
