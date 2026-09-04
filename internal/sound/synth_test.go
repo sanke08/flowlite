@@ -79,9 +79,12 @@ func TestCuesAreWellFormed(t *testing.T) {
 }
 
 func TestWorkingIsUnobtrusive(t *testing.T) {
+	// Working repeats constantly during transcription, so it still has to
+	// stay clearly under Start/Stop rather than compete with them — but it
+	// also has to be audible on its own, which the old 0.12 ceiling wasn't.
 	w, s := rms(Samples(Working)), rms(Samples(Start))
-	if w > 0.12*s {
-		t.Errorf("working RMS %.4f > 0.12 × start RMS %.4f", w, s)
+	if w > 0.45*s {
+		t.Errorf("working RMS %.4f > 0.45 × start RMS %.4f", w, s)
 	}
 }
 

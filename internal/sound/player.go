@@ -117,11 +117,11 @@ func (p *Player) StartWorking() {
 	stop := make(chan struct{})
 	p.workStop = stop
 	go func() {
-		t := time.NewTicker(380 * time.Millisecond)
+		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
 		// First tick lands just after the Stop cue finishes, not on top of it.
 		select {
-		case <-time.After(260 * time.Millisecond):
+		case <-time.After(50 * time.Millisecond):
 		case <-stop:
 			return
 		}

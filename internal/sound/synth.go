@@ -3,10 +3,12 @@
 // works. Every cue is synthesised — no asset files to ship or lose.
 //
 // The six cues are one instrument family: a small struck body (a few
-// harmonics that die at different speeds, like a marimba bar or a soft bell),
-// two slightly detuned layers for width, a whisper of room, and a warm
-// tanh/low-pass finish. They all live in D major so that any two heard in a
-// row sound like phrases of one voice rather than unrelated beeps.
+// harmonics that die at different speeds, like a marimba bar or a soft bell)
+// sitting on top of a felt 70 Hz sub layer, two slightly detuned layers for
+// width, a whisper of room, and a warm tanh/low-pass finish tuned dark
+// rather than bright — weight over sparkle. They all live in D major so that
+// any two heard in a row sound like phrases of one voice rather than
+// unrelated beeps.
 package sound
 
 import "math"
@@ -32,8 +34,10 @@ func (c Cue) String() string {
 // Pitches (D major) shared by every cue.
 const (
 	d2  = 73.42
+	a2  = 110.00
 	eb3 = 155.56
 	a3  = 220.00
+	d4  = 293.66
 	a4  = 440.00
 	d5  = 587.33
 	fs5 = 739.99
@@ -48,30 +52,48 @@ type partial struct{ ratio, amp, decay float64 }
 
 var (
 	// mallet is the family's main timbre: warm, rounded, short sustain.
+	// Fundamental and second partial carry more of the body now; the upper
+	// partials are trimmed so the strike reads as weight, not glare.
 	mallet = []partial{
-		{1, 1.00, 0.140},
-		{2, 0.32, 0.070},
-		{3, 0.14, 0.040},
-		{4.18, 0.05, 0.020}, // a touch inharmonic: "wood", not "organ"
+		{1, 1.00, 0.170},
+		{2, 0.30, 0.078},
+		{3, 0.09, 0.032},
+		{4.18, 0.03, 0.015}, // a touch inharmonic: "wood", not "organ"
 	}
-	// chime is brighter — a shimmering, quickly fading top end for Done.
+	// chime is brighter — a shimmering, quickly fading top end for Done —
+	// but the shimmer is a garnish now, not the body: fundamental up, the
+	// two topmost partials well down.
 	chime = []partial{
-		{1, 1.00, 0.110},
-		{2, 0.40, 0.060},
-		{2.99, 0.28, 0.035}, // detuned 3rd partial → soft shimmer beat
-		{4.05, 0.14, 0.022},
-		{6.3, 0.05, 0.012},
+		{1, 1.00, 0.135},
+		{2, 0.42, 0.078},
+		{2.99, 0.16, 0.028}, // detuned 3rd partial → soft shimmer beat
+		{4.05, 0.07, 0.016},
+		{6.3, 0.02, 0.009},
 	}
 	// dull is the low, damped body used for Cancel and Error.
 	dull = []partial{
-		{1, 1.00, 0.150},
-		{2, 0.22, 0.060},
-		{3, 0.06, 0.030},
+		{1, 1.00, 0.200},
+		{2, 0.14, 0.050},
+		{3, 0.03, 0.020},
 	}
-	// tock is a wood-block knock: almost no overtones, gone in a blink.
-	tock = []partial{
-		{1, 1.00, 0.012},
-		{2.4, 0.18, 0.005},
+	// tick is modeled directly on Apple's own Tock.caf (the iOS
+	// picker-wheel detent), measured from the actual file: not a tone at
+	// all, but a dense inharmonic cluster around 1.8-3.6 kHz that peaks in
+	// under a millisecond, then a much quieter buzzy tail lingering for
+	// another ~18 ms. A single clean partial can never sound like this —
+	// it's the density and inharmonicity that read as a mechanical click
+	// instead of a note.
+	tick = []partial{
+		// the hit: broadband, dies within ~1-2 ms.
+		{1.00, 1.00, 0.0009},
+		{2.05, 0.55, 0.0008},
+		{2.35, 0.45, 0.0007},
+		{3.55, 0.30, 0.0006},
+		{3.95, 0.22, 0.0005},
+		// the tail: same cluster, much quieter, decays across the rest of
+		// the note instead of dying with the hit.
+		{2.20, 0.10, 0.0060},
+		{3.70, 0.08, 0.0060},
 	}
 	// pure is a single sine, used for the sub-bass body.
 	pure = []partial{{1, 1, 1}}
@@ -155,11 +177,12 @@ func raisedCos(x float64) float64 {
 	return 0.5 - 0.5*math.Cos(math.Pi*x)
 }
 
-// sub is the low body that gives a cue weight: a soft 70 Hz swell under a
-// note, felt more than heard.
+// sub is the low body that gives a cue weight: a 70 Hz swell under a note.
+// It used to be felt more than heard; now it's meant to be heard — a
+// rounder, fuller low end is most of what makes these cues feel expensive.
 func sub(at, amp float64) note {
 	return note{freq: d2, at: at, dur: 0.16, amp: amp, partials: pure,
-		attack: 0.018, release: 0.08, glide: 1.25, glideTau: 0.03}
+		attack: 0.014, release: 0.09, glide: 1.25, glideTau: 0.03}
 }
 
 // master is the finishing chain applied to every cue.
@@ -304,54 +327,71 @@ type design struct {
 var designs = [6]design{
 	// Start — "go ahead": a rising fourth (A4 → D5) with a soft sub swell
 	// under the first note so it lands with weight, then room.
+	// Start — the portamento swoop read as ambient hum, not "go": a start
+	// cue needs a decisive onset, not a slow bloom. Back to a clearly
+	// struck rising fourth (A3 → D4, octave down from the original) for
+	// that, kept premium with wide chorus detune, a low boom with
+	// kick-style pitch drop, a sustained bass pad, and more room.
 	Start: {
-		length: 0.240,
+		length: 0.250,
 		voices: []note{
-			sub(0, 0.55),
-			{freq: a4, at: 0.000, dur: 0.200, amp: 0.9, partials: mallet, attack: 0.008, release: 0.05, glide: 0.985, detune: 6},
-			{freq: d5, at: 0.075, dur: 0.165, amp: 1.0, partials: mallet, attack: 0.008, release: 0.05, glide: 0.985, detune: 6},
+			{freq: d2, at: 0.000, dur: 0.220, amp: 1.0, partials: pure, attack: 0.007, release: 0.15, glide: 1.6, glideTau: 0.04},
+			{freq: a2, at: 0.000, dur: 0.230, amp: 0.5, partials: dull, attack: 0.022, release: 0.12, detune: 4},
+			{freq: a3, at: 0.000, dur: 0.150, amp: 0.9, partials: mallet, attack: 0.008, release: 0.05, glide: 0.985, detune: 8},
+			{freq: d4, at: 0.070, dur: 0.170, amp: 1.0, partials: mallet, attack: 0.008, release: 0.05, glide: 0.985, detune: 8, decay: 1.3},
 		},
-		master: master{cutoff: 6500, drive: 1.3, wet: 0.28, rt60: 0.09, peak: 0.45},
+		master: master{cutoff: 4000, drive: 1.45, wet: 0.34, rt60: 0.12, peak: 0.46},
 	},
-	// Stop — the mirror: D5 → A4, a shade softer and rounder, fainter sub.
+	// Stop — the mirror of Start, same treatment: a settling descending
+	// fourth (D4 → A3, dropped an octave), a low boom under it with a
+	// gentler pitch drop than Start's (settling, not launching), a
+	// sustained bass pad, wide chorus detune, and a touch more room.
 	Stop: {
-		length: 0.220,
+		length: 0.235,
 		voices: []note{
-			sub(0.07, 0.35),
-			{freq: d5, at: 0.000, dur: 0.190, amp: 0.85, partials: mallet, attack: 0.010, release: 0.05, glide: 1.012, detune: 6},
-			{freq: a4, at: 0.070, dur: 0.150, amp: 1.0, partials: mallet, attack: 0.010, release: 0.05, glide: 1.012, detune: 6, decay: 1.2},
+			{freq: d2, at: 0.000, dur: 0.200, amp: 0.95, partials: pure, attack: 0.007, release: 0.13, glide: 1.5, glideTau: 0.035},
+			{freq: a2, at: 0.000, dur: 0.210, amp: 0.5, partials: dull, attack: 0.020, release: 0.11, detune: 4},
+			{freq: d4, at: 0.000, dur: 0.140, amp: 0.85, partials: mallet, attack: 0.008, release: 0.05, glide: 1.012, detune: 8},
+			{freq: a3, at: 0.065, dur: 0.155, amp: 1.0, partials: mallet, attack: 0.008, release: 0.06, glide: 1.012, detune: 8, decay: 1.3},
 		},
-		master: master{cutoff: 5500, drive: 1.3, wet: 0.28, rt60: 0.09, peak: 0.38},
+		master: master{cutoff: 3800, drive: 1.4, wet: 0.32, rt60: 0.11, peak: 0.38},
 	},
-	// Working — a muted wood-block "tock": one very short knock with a fast
-	// downward pitch drop, heavily low-passed, far below everything else.
+	// Working — Apple's Tock.caf, reverse-engineered: base freq ~900 Hz so
+	// the tick's ratios land on the ~1.8-3.6 kHz cluster measured from the
+	// real file, full ~22 ms length to fit hit + tail, near-instant attack
+	// (the real file's own attack is under 0.5 ms) but no drive/glide/
+	// reverb — those would turn the click into a tone.
 	Working: {
-		length: 0.036,
+		length: 0.022,
 		voices: []note{
-			{freq: d5, at: 0, dur: 0.034, amp: 1, partials: tock, attack: 0.004, release: 0.012, glide: 1.6, glideTau: 0.006},
+			{freq: 900, at: 0, dur: 0.021, amp: 1, partials: tick, attack: 0.0009, release: 0.003},
 		},
-		master: master{cutoff: 2600, drive: 1.1, peak: 0.045},
+		master: master{cutoff: 4800, drive: 0, peak: 0.05},
 	},
-	// Done — a sparkle: A5 then D6 in quick succession, chime timbre with a
-	// detuned third partial that shimmers for a moment, resolving on the
-	// tonic an octave up.
+	// Done — the sparkle (A5 → D6, chime timbre, shimmering detuned third
+	// partial) stays, but now sits on the same low boom + sustained pad
+	// as Start/Stop instead of the old faint sub swell — the "ding" keeps
+	// its brightness on top while gaining real weight underneath.
 	Done: {
 		length: 0.200,
 		voices: []note{
-			{freq: a5, at: 0.000, dur: 0.170, amp: 0.8, partials: chime, attack: 0.005, release: 0.04, glide: 0.99, detune: 8},
-			{freq: d6, at: 0.045, dur: 0.155, amp: 1.0, partials: chime, attack: 0.005, release: 0.04, glide: 0.99, detune: 8},
-			{freq: fs5, at: 0.045, dur: 0.155, amp: 0.35, partials: mallet, attack: 0.006, release: 0.04, detune: 5},
+			{freq: d2, at: 0.000, dur: 0.180, amp: 0.95, partials: pure, attack: 0.007, release: 0.11, glide: 1.5, glideTau: 0.035},
+			{freq: a2, at: 0.000, dur: 0.190, amp: 0.45, partials: dull, attack: 0.018, release: 0.09, detune: 4},
+			{freq: a5, at: 0.000, dur: 0.170, amp: 0.75, partials: chime, attack: 0.005, release: 0.04, glide: 0.99, detune: 8},
+			{freq: d6, at: 0.045, dur: 0.155, amp: 0.85, partials: chime, attack: 0.005, release: 0.04, glide: 0.99, detune: 8},
+			{freq: fs5, at: 0.045, dur: 0.155, amp: 0.40, partials: mallet, attack: 0.006, release: 0.04, detune: 5},
 		},
-		master: master{cutoff: 9000, drive: 1.2, wet: 0.32, rt60: 0.10, peak: 0.42},
+		master: master{cutoff: 4300, drive: 1.4, wet: 0.30, rt60: 0.11, peak: 0.42},
 	},
 	// Cancel — a single low A3 that sighs downward a semitone: neutral,
 	// "never mind", nothing to worry about.
 	Cancel: {
 		length: 0.150,
 		voices: []note{
+			sub(0, 0.40),
 			{freq: a3, at: 0, dur: 0.135, amp: 1, partials: dull, attack: 0.012, release: 0.05, glide: 1.03, glideTau: 0.015, slide: 0.94, detune: 5},
 		},
-		master: master{cutoff: 3200, drive: 1.3, wet: 0.2, rt60: 0.07, peak: 0.34},
+		master: master{cutoff: 2400, drive: 1.4, wet: 0.20, rt60: 0.08, peak: 0.34},
 	},
 	// Error — two dull low thuds descending A3 → E♭3 (a tritone, the one
 	// interval that cannot resolve), each with a faint sub under it. Clearly
@@ -359,12 +399,12 @@ var designs = [6]design{
 	Error: {
 		length: 0.360,
 		voices: []note{
-			sub(0.000, 0.45),
+			sub(0.000, 0.80),
 			{freq: a3, at: 0.000, dur: 0.170, amp: 1.0, partials: dull, attack: 0.010, release: 0.05, glide: 0.97, detune: 7},
-			sub(0.150, 0.45),
+			sub(0.150, 0.80),
 			{freq: eb3, at: 0.150, dur: 0.190, amp: 1.0, partials: dull, attack: 0.010, release: 0.06, glide: 0.97, detune: 9, decay: 1.2},
 		},
-		master: master{cutoff: 2200, drive: 1.4, wet: 0.22, rt60: 0.09, peak: 0.42},
+		master: master{cutoff: 1700, drive: 1.5, wet: 0.22, rt60: 0.10, peak: 0.42},
 	},
 }
 
