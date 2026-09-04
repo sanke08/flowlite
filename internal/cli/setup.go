@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -96,6 +97,27 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	if err := cfg.Save(); err != nil {
 		return err
+	}
+
+	// 4. Put the binary somewhere `flowlite` resolves from any terminal.
+	if !runningFromPath() {
+		doInstall := true
+		if err := huh.NewConfirm().
+			Title("Install flowlite so it works from any terminal?").
+			Description("Copies this file to " + installDir()).
+			Affirmative("Yes").Negative("Skip").Value(&doInstall).Run(); err != nil {
+			return err
+		}
+		if doInstall {
+			if dest, err := installSelf(); err != nil {
+				fmt.Println(warn("  install skipped: " + err.Error()))
+			} else {
+				fmt.Printf("%s installed to %s\n", ok("✓"), dest)
+				if !onPath(filepath.Dir(dest)) {
+					fmt.Println(dim("  add to ~/.zshrc:  export PATH=\"" + filepath.Dir(dest) + ":$PATH\""))
+				}
+			}
+		}
 	}
 
 	fmt.Println()

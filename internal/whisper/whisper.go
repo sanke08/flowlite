@@ -8,8 +8,6 @@
 package whisper
 
 /*
-#cgo darwin CFLAGS:  -I/opt/homebrew/opt/whisper-cpp/include -I/opt/homebrew/opt/ggml/include
-#cgo darwin LDFLAGS: -L/opt/homebrew/opt/whisper-cpp/lib -L/opt/homebrew/opt/ggml/lib -lwhisper -lggml -lggml-base
 #cgo windows LDFLAGS: -lwhisper -lggml -lggml-base
 #cgo linux LDFLAGS: -lwhisper -lggml -lggml-base
 #include <stdlib.h>

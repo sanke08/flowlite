@@ -11,17 +11,42 @@ flowlite setup     # once: permission, model download, dictation key
 flowlite run       # then tap Right Option in any text field and speak
 ```
 
-## Install (macOS)
+## Install (macOS, Apple Silicon)
+
+One line, nothing else needed — not Homebrew, not Python, not Go:
 
 ```bash
-brew install whisper-cpp
-git clone https://github.com/sanke08/flowlite && cd flowlite
-make install       # builds and copies to /opt/homebrew/bin — no sudo
-flowlite setup
+curl -fsSL https://raw.githubusercontent.com/sanke08/flowlite/main/install.sh | sh
 ```
 
-`brew install whisper-cpp` provides `libwhisper` with Metal enabled; FlowLite
-links against it rather than shipping its own copy. Go 1.26 is needed to build (see go.mod).
+It downloads the latest release (a single 12 MB binary with whisper.cpp built
+in), puts it on your PATH, and starts `flowlite setup`.
+
+### Or hand someone the file
+
+`make release` produces **one self-contained file**,
+`dist/flowlite-<version>-macos-arm64`. Send it any way you like. Because it is
+not signed with a paid Apple certificate, macOS quarantines browser downloads
+and silently kills the binary on launch (exit 137). The recipient runs once:
+
+```bash
+xattr -d com.apple.quarantine ~/Downloads/flowlite && ~/Downloads/flowlite
+```
+
+FlowLite then takes over: it asks for the keyboard permission, offers the
+model download, picks the key, and installs itself onto PATH. The `curl`
+installer above avoids the quarantine step entirely, which is why it is the
+recommended way.
+
+### Build from source
+
+```bash
+git clone https://github.com/sanke08/flowlite && cd flowlite
+make install       # builds whisper.cpp statically (cmake), links, installs — no sudo
+```
+
+Needs Go 1.26 and cmake (`brew install cmake`). `make build` is the quicker
+developer build that links against Homebrew's `whisper-cpp` instead.
 
 ## How a dictation works
 
@@ -121,7 +146,9 @@ scripts/fetch-windows-deps.sh   # official whisper.cpp DLLs + headers → third_
 make windows                    # → dist/windows/flowlite.exe + DLLs
 ```
 
-Ship the whole `dist/windows/` folder; the DLLs must sit next to the `.exe`.
+`make windows` also produces `dist/flowlite-<version>-windows-x64.zip` — that
+zip is the thing to share. The DLLs must stay next to the `.exe`; a single-file
+Windows build would need a static whisper.cpp built with mingw and is not done.
 Windows needs no special permission for the keyboard hook. The default key is
 Right Control.
 

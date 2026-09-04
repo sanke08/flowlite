@@ -13,3 +13,6 @@ Thumbs.db
 
 # Old Python-era installers left on disk; never commit binaries here
 /app/
+
+# whisper.cpp source for the self-contained (static) build
+/third_party/whisper.cpp/

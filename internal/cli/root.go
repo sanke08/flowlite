@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
@@ -126,6 +127,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	// A freshly downloaded binary, double-clicked or run once: go straight
+	// into setup instead of printing a status page nobody asked for.
+	if !cfg.Configured() && term.IsTerminal(int(os.Stdin.Fd())) {
+		return runSetup(cmd, args)
 	}
 	fmt.Println(bold("FlowLite"), dim(Version))
 	fmt.Println()
