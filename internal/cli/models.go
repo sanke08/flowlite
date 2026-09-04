@@ -15,21 +15,20 @@ import (
 
 var modelsCmd = &cobra.Command{
 	Use:   "models",
-	Short: "List speech models: what exists, what is downloaded, what is active",
+	Short: "List speech models; ● marks the one installed",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  %-3s %-20s %-30s %9s  %s\n", "", "NAME", "", "SIZE", "")
 		for _, m := range catalog.Catalog {
 			mark := "  "
-			if m.Key == cfg.Model {
+			if m.Key == cfg.Model && m.Downloaded() {
 				mark = ok("●") + " "
 			}
-			state := dim("not downloaded")
+			state := dim("not installed")
 			if m.Downloaded() {
-				state = ok("downloaded")
+				state = ok("installed")
 			}
 			rec := ""
 			if m.Recommended {
@@ -39,29 +38,61 @@ var modelsCmd = &cobra.Command{
 			fmt.Printf("      %s\n", dim(m.Blurb))
 		}
 		fmt.Println()
-		fmt.Println(dim("  ● active    download with: flowlite download <name>    switch with: flowlite use <name>"))
+		fmt.Println(dim("  FlowLite keeps one model on disk. Switch with: flowlite use <name>"))
+		extraModelsWarning()
 		return nil
 	},
 }
 
-var downloadCmd = &cobra.Command{
-	Use:   "download <name>",
-	Short: "Download a model (resumes if interrupted)",
-	Args:  cobra.ExactArgs(1),
+// useCmd is the single model operation: fetch if needed, make it active, and
+// remove whatever else is on disk. `download` is kept as an alias.
+var useCmd = &cobra.Command{
+	Use:     "use <name>",
+	Aliases: []string{"download"},
+	Short:   "Switch to a model: download it if needed, then remove the previous one",
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, found := catalog.Get(args[0])
 		if !found {
 			return fmt.Errorf("unknown model %q — see `flowlite models`", args[0])
 		}
-		if m.Downloaded() {
-			fmt.Printf("%s is already downloaded (%s)\n", m.Label, catalog.Human(m.DiskBytes()))
-			return maybeActivate(m)
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		return switchModel(cfg, m)
+	},
+}
+
+// switchModel implements the one-model rule. The old model is deleted only
+// once the new one is completely on disk, so an interrupted download never
+// strands the user without a working model.
+func switchModel(cfg *configT, m catalog.Model) error {
+	if !m.Downloaded() {
+		if cur, has := catalog.Get(cfg.Model); has && cur.Downloaded() && cur.Key != m.Key {
+			fmt.Println(dim("  " + cur.Label + " will be removed once " + m.Label + " has finished downloading."))
 		}
 		if err := downloadWithBar(m); err != nil {
 			return err
 		}
-		return maybeActivate(m)
-	},
+	}
+	cfg.Model = m.Key
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("%s active model: %s\n", ok("✓"), m.Label)
+
+	removed, err := catalog.PruneExcept(m.Key)
+	for _, r := range removed {
+		fmt.Printf("%s removed %s (freed %s)\n", ok("✓"), r.Model.Label, catalog.Human(r.Bytes))
+	}
+	if err != nil {
+		fmt.Println(warn("  could not remove an old model: " + err.Error()))
+	}
+	if _, running := daemonRunning(); running {
+		fmt.Println(dim("  restart the daemon to pick it up: flowlite stop && flowlite start"))
+	}
+	return nil
 }
 
 // downloadWithBar fetches m with a terminal progress bar. Ctrl+C leaves a
@@ -97,31 +128,9 @@ func downloadWithBar(m catalog.Model) error {
 	return nil
 }
 
-// maybeActivate makes a freshly downloaded model the active one if nothing
-// else is, so the common path needs no second command.
-func maybeActivate(m catalog.Model) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	if cfg.Model == m.Key {
-		return nil
-	}
-	if cur, has := catalog.Get(cfg.Model); has && cur.Downloaded() {
-		fmt.Println(dim("  active model is still " + cur.Label + " — switch with: flowlite use " + m.Key))
-		return nil
-	}
-	cfg.Model = m.Key
-	if err := cfg.Save(); err != nil {
-		return err
-	}
-	fmt.Printf("%s now the active model\n", ok("✓"))
-	return nil
-}
-
 var removeCmd = &cobra.Command{
 	Use:   "remove <name>",
-	Short: "Delete a downloaded model",
+	Short: "Delete an installed model",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, found := catalog.Get(args[0])
@@ -129,7 +138,7 @@ var removeCmd = &cobra.Command{
 			return fmt.Errorf("unknown model %q", args[0])
 		}
 		if !m.Downloaded() {
-			fmt.Printf("%s is not downloaded\n", m.Label)
+			fmt.Printf("%s is not installed\n", m.Label)
 			return nil
 		}
 		freed := catalog.Human(m.DiskBytes())
@@ -140,41 +149,25 @@ var removeCmd = &cobra.Command{
 		if err == nil && cfg.Model == m.Key {
 			cfg.Model = ""
 			_ = cfg.Save()
-			fmt.Println(dim("  that was the active model — pick another with: flowlite use <name>"))
+			fmt.Println(dim("  that was the active model — choose another with: flowlite use <name>"))
 		}
 		fmt.Printf("%s removed %s (freed %s)\n", ok("✓"), m.Label, freed)
 		return nil
 	},
 }
 
-var useCmd = &cobra.Command{
-	Use:   "use <name>",
-	Short: "Choose which downloaded model to dictate with",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		m, found := catalog.Get(args[0])
-		if !found {
-			return fmt.Errorf("unknown model %q — see `flowlite models`", args[0])
+// extraModelsWarning nudges when the one-model rule is violated (files that
+// predate it, or an interrupted switch).
+func extraModelsWarning() {
+	if inst := catalog.Installed(); len(inst) > 1 {
+		var total int64
+		for _, m := range inst {
+			total += m.DiskBytes()
 		}
-		if !m.Downloaded() {
-			return fmt.Errorf("%s is not downloaded yet — run: flowlite download %s", m.Label, m.Key)
-		}
-		cfg, err := loadConfig()
-		if err != nil {
-			return err
-		}
-		cfg.Model = m.Key
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-		fmt.Printf("%s active model: %s\n", ok("✓"), m.Label)
-		if _, running := daemonRunning(); running {
-			fmt.Println(dim("  restart the daemon to pick it up: flowlite stop && flowlite start"))
-		}
-		return nil
-	},
+		fmt.Println(warn(fmt.Sprintf("  %d models on disk (%s). FlowLite keeps one — run: flowlite use <name>", len(inst), catalog.Human(total))))
+	}
 }
 
 func init() {
-	rootCmd.AddCommand(modelsCmd, downloadCmd, removeCmd, useCmd)
+	rootCmd.AddCommand(modelsCmd, useCmd, removeCmd)
 }

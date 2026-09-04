@@ -90,6 +90,14 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if inst := catalog.Installed(); len(inst) > 1 {
+		names := ""
+		for _, im := range inst {
+			names += " " + im.Key
+		}
+		fail("disk", fmt.Sprintf("%d models installed (%s) — FlowLite keeps one; run: flowlite use %s", len(inst), names, cfg.Model))
+	}
+
 	// -- microphone -------------------------------------------------------
 	devs, derr := audio.ListDevices()
 	switch {

@@ -74,12 +74,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	m, _ := catalog.Get(modelKey)
-	if !m.Downloaded() {
-		if err := downloadWithBar(m); err != nil {
-			return err
-		}
+	if err := switchModel(cfg, m); err != nil {
+		return err
 	}
-	cfg.Model = m.Key
 
 	// 3. Key.
 	keyOpts := make([]huh.Option[string], 0)

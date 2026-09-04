@@ -161,6 +161,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  daemon     %s\n", dim("not running"))
 	}
+	extraModelsWarning()
 
 	fmt.Println()
 	switch {

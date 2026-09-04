@@ -136,8 +136,9 @@ func Human(n int64) string {
 	}
 }
 
-// Downloaded returns every model present on disk.
-func Downloaded() []Model {
+// Installed returns every model present on disk. FlowLite keeps exactly one;
+// more than one means a switch was interrupted, or the files predate that rule.
+func Installed() []Model {
 	var out []Model
 	for _, m := range Catalog {
 		if m.Downloaded() {
@@ -145,4 +146,28 @@ func Downloaded() []Model {
 		}
 	}
 	return out
+}
+
+// Removed records one deleted model and the space it gave back.
+type Removed struct {
+	Model Model
+	Bytes int64
+}
+
+// PruneExcept deletes every installed model other than keep. It is called
+// only after a new model is completely on disk, so a failed download can
+// never leave the user with nothing.
+func PruneExcept(keep string) (removed []Removed, err error) {
+	for _, m := range Installed() {
+		if m.Key == keep {
+			continue
+		}
+		size := m.DiskBytes() // before the file is gone
+		if rerr := m.Remove(); rerr != nil {
+			err = rerr
+			continue
+		}
+		removed = append(removed, Removed{Model: m, Bytes: size})
+	}
+	return removed, err
 }
