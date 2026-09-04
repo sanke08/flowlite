@@ -1,29 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-*.egg-info/
+# Build output
+/bin/
+/dist/
+*.test
+*.out
 
-# PyInstaller intermediates
-build/
-dist/
-
-# Built installers.
-#
-# These are ignored on purpose. Each release is ~57 MB, and git keeps every
-# version forever — ten releases would add half a gigabyte to every clone.
-# The CI workflow attaches installers to GitHub Releases instead, which is
-# where people should download them from.
-#
-# If you would rather commit them anyway, delete the four lines below.
-app/v*/*.dmg
-app/v*/*.zip
-app/v*/*.exe
-app/v*/*.sha256
+# Windows cross-build inputs (downloaded, not vendored)
+/third_party/windows/
 
 # OS noise
 .DS_Store
 Thumbs.db
 
-# self-test report
-selftest.txt
+# Old Python-era installers left on disk; never commit binaries here
+/app/

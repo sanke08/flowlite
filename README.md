@@ -1,282 +1,163 @@
 # FlowLite
 
-A free, local, cross-platform alternative to Wispr Flow.
+Free, local speech-to-text from the command line. Tap a key, talk, and the
+words appear wherever your cursor is. Nothing leaves your computer.
 
-Press one key, talk, and your words appear in whatever text field you were
-already using. No account, no subscription, no audio leaves your computer.
+- **macOS (Apple Silicon)** — built and tested. Runs whisper.cpp on the GPU via Metal.
+- **Windows x64** — cross-compiled and linked from macOS, not yet run on Windows. See below.
 
-Runs on **macOS** and **Windows** from a single codebase.
+```
+flowlite setup     # once: permission, model download, dictation key
+flowlite run       # then tap Right Option in any text field and speak
+```
 
----
+## Install (macOS)
 
-## How it works
+```bash
+brew install whisper-cpp
+git clone https://github.com/sanke08/flowlite && cd flowlite
+make install       # builds and copies to /opt/homebrew/bin — no sudo
+flowlite setup
+```
 
-| Step | What happens |
+`brew install whisper-cpp` provides `libwhisper` with Metal enabled; FlowLite
+links against it rather than shipping its own copy. Go 1.26 is needed to build (see go.mod).
+
+## How a dictation works
+
+| you | FlowLite |
 | --- | --- |
-| 1 | A global hotkey listener watches for your dictation key from any app |
-| 2 | Your microphone records to memory at 16 kHz — nothing is written to disk |
-| 3 | Whisper runs locally — on the GPU where one is available |
-| 4 | The text is placed on the clipboard and pasted at your cursor |
-| 5 | Your previous clipboard contents are put back |
+| tap or hold the key | rising two-note cue · pill appears with a live waveform |
+| speak | bars follow your voice |
+| release / tap again | falling cue · bars collapse into a spinner · soft tick while the model works |
+| — | text is pasted at the cursor · bright tick · spinner becomes a ✓ · pill fades |
+| Esc while recording | low note · × · nothing pasted |
 
-## The dictation key
+Recording starts the instant the key goes down, so no speech is lost while it
+works out whether this is a tap or a hold. The cut-off is 400 ms.
 
-The default is **Right Option** on macOS and **Right Control** on Windows.
-Both gestures work on the same key:
+Silence is never pasted: audio is gated on level before inference, and Whisper's
+favourite hallucinations on silence ("Thank you.", "Thanks for watching!") are
+filtered out afterwards.
 
-- **Tap it** — recording starts. Tap again when you're finished.
-- **Hold it** — recording lasts only while the key is down (push-to-talk).
-- **Esc while recording** — discard the take and paste nothing.
+## Commands
 
-Recording begins the instant the key goes down, so nothing is clipped while
-the app works out which gesture you meant. The cutoff between the two is
-adjustable in Preferences.
+```
+flowlite                 where things stand and the one thing to do next
+flowlite setup           interactive: permission → model → key
+flowlite doctor          checks engine, Metal, model, mic, clipboard, permission; says how to fix each
+flowlite run             foreground daemon (recommended); --no-paste prints instead of pasting
+flowlite start|stop|status   background daemon
+flowlite test            record 4 s and print the transcript — no hotkey, no paste
+                         --file x.wav to transcribe a 16 kHz mono WAV instead
 
-## Choosing a model
+flowlite models          list models; ● marks the active one
+flowlite download <m>    resumable; Ctrl+C and rerun to continue
+flowlite use <m>         switch model
+flowlite remove <m>
 
-On first launch FlowLite opens the model picker. Nothing is bundled — you pick
-what to download, and it is fetched from Hugging Face once. Models can be
-added and removed at any time from **Settings → Speech models**.
+flowlite key [name]      alt_r ctrl_r cmd_r shift_r f13 f14 f15
+flowlite mic [list|name|default]
+flowlite lang [code|auto]
+flowlite sounds [on|off]
+```
 
-| Model | Size | Notes |
+## The one permission that matters
+
+macOS does not let any program see the keyboard globally without
+**Accessibility**. Without it, the dictation key does nothing — silently. This
+is the step almost everyone misses, and it is the *only* reason the earlier
+version of this project "didn't work".
+
+The permission attaches to the app that launched `flowlite` — normally
+**Terminal** — not to the `flowlite` binary. That has a nice consequence: grant
+it once and it survives every rebuild.
+
+```bash
+flowlite doctor --request   # macOS opens its prompt and adds Terminal to the list
+# System Settings → Privacy & Security → Accessibility → switch on Terminal
+flowlite doctor             # confirms
+flowlite run
+```
+
+`flowlite doctor` names the exact app that needs the grant.
+
+## Models
+
+Downloaded on demand from Hugging Face into
+`~/Library/Application Support/FlowLite/models/`. Nothing is bundled.
+
+| model | size | notes |
 | --- | --- | --- |
-| Tiny (English) | 74 MB | Fastest, least accurate. Mangles names and jargon. |
-| Base (English) | 141 MB | Near-instant, clearly better than Tiny. |
-| Small (English) | 465 MB | Strong everyday English, comfortably sub-second. |
-| **Large v3 Turbo (compressed)** | **547 MB** | **Recommended.** 99 languages, handles accents well, ~1.5 s per dictation. |
-| Large v3 Turbo (full) | 1.5 GB | Uncompressed Turbo. Marginally better, 3× the disk. |
-| Large v3 | 3.0 GB | Most accurate, several times slower than Turbo. |
-
-The compressed Turbo build is the sweet spot: quantisation cuts it to a third
-of the full size with no transcript difference in testing, and because most of
-its latency is fixed overhead, the cost is roughly the same whether you dictate
-five seconds or thirty.
-
-Weights live in:
-- macOS — `~/Library/Application Support/FlowLite/models/<engine>/`
-- Windows — `%LOCALAPPDATA%\FlowLite\models\<engine>\`
-
-## Two inference engines
-
-The same Whisper weights ship in two incompatible formats, and FlowLite picks
-the faster one for your machine automatically. The engine in use is shown at
-the top of the model picker.
-
-| Engine | Used when | Runs on |
-| --- | --- | --- |
-| **whisper.cpp** | Default everywhere it loads | Apple GPU via Metal; CPU elsewhere |
-| **faster-whisper** | NVIDIA GPU present, or Intel Mac | CUDA float16, or CPU int8 |
-
-This matters more than it sounds. CTranslate2 — what `faster-whisper` uses —
-has no Metal backend, so on Apple Silicon it is CPU-only. Measured on this
-M5, Large v3 Turbo ran at **0.6× realtime** on CTranslate2 and **4× realtime**
-on whisper.cpp with Metal. The first is unusable for dictation; the second is
-not.
-
-## Installing
-
-Built installers live in [`app/`](app/), one folder per version. Grab the file
-for your machine — that single file is everything. No Python, no `pip`, no
-virtualenv. The speech model is downloaded from inside the app on first
-launch, which keeps the download small.
-
-| Platform | File |
-| --- | --- |
-| macOS (Apple Silicon) | `FlowLite-<version>-macOS-arm64.dmg` — 57 MB |
-| Windows 10/11 (x64) | `FlowLite-<version>-Windows-x64.zip` |
-
-### macOS
-
-Open the `.dmg`, drag FlowLite to Applications, then **double-click
-`Fix-Gatekeeper.command`** in the same window.
-
-That third step is not optional. FlowLite is not signed with a paid Apple
-Developer certificate, so macOS quarantines it and reports that the app is
-**"damaged and can't be opened"**. Nothing is damaged — macOS just cannot
-verify the publisher. The helper runs `xattr -cr /Applications/FlowLite.app`,
-which clears the quarantine flag.
-
-### Windows
-
-Unzip and run `FlowLite.exe`. If SmartScreen warns about an unrecognised app,
-choose **More info → Run anyway** — same cause, no signing certificate.
-
-### First launch
-
-1. FlowLite opens the model picker — choose one and press **Download**.
-2. macOS only: **Permissions** tab → **Grant Accessibility**, switch FlowLite
-   on in System Settings, then **quit and relaunch**.
-3. Tap your dictation key in any text field and talk.
-
-Full instructions, checksums and per-version notes: [`app/README.md`](app/README.md).
-
-## Building the installers
-
-Requires a checkout and [uv](https://github.com/astral-sh/uv) (or `venv`).
-Build on the OS you are targeting — there is no cross-compilation.
-
-```bash
-./run.sh          # one-time: creates .venv and installs dependencies
-./build-macos.sh  # -> app/v<version>/FlowLite-<version>-macOS-arm64.dmg
-```
-
-```bat
-run.bat
-build-windows.bat :: -> app\v<version>\FlowLite-<version>-Windows-x64.zip
-```
-
-Or push a tag and let CI build both — `.github/workflows/release.yml` runs the
-tests, builds on macOS and Windows runners, self-tests each bundle, and
-attaches them to a GitHub Release:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The version comes from `flowlite/__init__.py` alone; `pyproject.toml`, the
-PyInstaller spec, the macOS bundle version and the artifact filenames all read
-from it, so a release cannot ship mismatched numbers.
-
-To check a build without a GUI:
-
-```bash
-./dist/FlowLite.app/Contents/MacOS/FlowLite --self-test
-```
-
-That verifies SSL, CA certificates, network reach to Hugging Face, the speech
-engine and its GPU, the microphone, the model directory, and the clipboard —
-the things that work from source but silently break once an app is frozen.
-
-### Signing
-
-The build ad-hoc signs by default, which is fine on your own machine. Ad-hoc
-signatures change on every rebuild, so macOS forgets the Accessibility grant
-each time you rebuild. For a stable identity — and to give the app to anyone
-else — sign with a Developer ID and notarise:
-
-```bash
-SIGN_ID="Developer ID Application: Your Name (TEAMID)" ./build-macos.sh
-xcrun notarytool submit dist/FlowLite.dmg --keychain-profile YOUR_PROFILE --wait
-xcrun stapler staple dist/FlowLite.dmg
-```
-
-Without notarisation, other people will get Gatekeeper warnings.
-
-## Running from source
-
-```bash
-./run.sh      # macOS / Linux
-run.bat       # Windows
-```
-
-Note that macOS then grants permissions to your *terminal*, not to FlowLite.
-Use a built `.app` for daily use.
-
-## macOS permissions
-
-FlowLite needs two permissions, and **which app they attach to depends on how
-you launched it** — this is the most confusing part of setup.
-
-| Launched from | Permission goes to |
-| --- | --- |
-| `FlowLite.app` | FlowLite |
-| `./run.sh` | Your terminal or IDE |
-
-1. **Accessibility** — required to see the dictation key from other apps and
-   to paste. Without it the hotkey silently does nothing. Use the **Grant
-   Accessibility** button in the Permissions tab: macOS then registers
-   FlowLite in the list for you, so you only have to flip the switch.
-2. **Microphone** — requested automatically the first time you record.
-
-**After granting Accessibility you must quit and relaunch.** macOS only
-re-checks at startup.
-
-Windows needs no special permissions, though some antivirus software blocks
-synthetic keystrokes — FlowLite will record but fail to paste if so.
+| tiny.en | 74 MB | fastest; mangles names |
+| base.en | 141 MB | near-instant |
+| small.en | 465 MB | strong everyday English, well under a second |
+| **large-v3-turbo-q5** | **547 MB** | **recommended** — 99 languages, accents, ~1.5 s |
+| large-v3-turbo | 1.5 GB | uncompressed Turbo |
+| large-v3 | 2.9 GB | most accurate, several times slower |
 
 ## Performance
 
-Measured on an Apple M5 (16 GB) with whisper.cpp + Metal, on a 6-second and a
-25-second clip. Times are wall-clock from audio in to text out.
+Apple M5, whisper.cpp via Metal, Large v3 Turbo (compressed):
 
-| Model | 6 s clip | 25 s clip |
+| audio | time | speed |
 | --- | --- | --- |
-| Small (English) | 0.28 s | 0.65 s |
-| Large v3 Turbo (compressed) | ~1.6 s | ~1.6 s |
+| 6.3 s | 1.48 s | 4.3× realtime |
+| 25.4 s | 2.06 s | 12.3× realtime |
 
-Turbo's cost is almost entirely fixed overhead, which is why the 25-second clip
-is no slower than the 6-second one. Small scales with length but is far below
-one second either way.
+Turbo's cost is mostly fixed overhead, so long dictations are barely slower
+than short ones. Model load is ~0.3 s warm. **The very first load on a machine
+takes ~15 s** while Metal compiles the shaders; macOS caches them afterwards.
 
-Two caveats on these numbers:
+## Windows (experimental)
 
-- They were taken on an otherwise quiet machine. Repeating them later while an
-  unrelated process held about two cores roughly doubled Turbo's time to ~3 s,
-  so expect real-world latency to track whatever else your machine is doing.
-- CTranslate2 on the same hardware took **12 s** for the 6-second clip. If you
-  are comparing against other local Whisper tools, check which engine they use.
+The Windows code — low-level keyboard hook, clipboard + `SendInput` paste, a
+layered GDI pill — is written and **cross-compiles and links from macOS**. It
+has **not been run on Windows**. Expect bugs; reports welcome.
 
-## Privacy
+```bash
+brew install mingw-w64
+scripts/fetch-windows-deps.sh   # official whisper.cpp DLLs + headers → third_party/windows
+make windows                    # → dist/windows/flowlite.exe + DLLs
+```
 
-Audio is held in memory and discarded after transcription. The only network
-request FlowLite ever makes is downloading a model you explicitly asked for.
-
-## Configuration
-
-`settings.json` and `flowlite.log` live in:
-- macOS — `~/Library/Application Support/FlowLite/`
-- Windows — `%APPDATA%\FlowLite\`
+Ship the whole `dist/windows/` folder; the DLLs must sit next to the `.exe`.
+Windows needs no special permission for the keyboard hook. The default key is
+Right Control.
 
 ## Project layout
 
 ```
-app/              built installers, one folder per version
-.github/          CI that builds macOS + Windows on a tag
-FlowLite.spec     PyInstaller build spec (Qt exclusions, macOS bundle)
-launcher.py       frozen entry point, plus --self-test diagnostics
-build-macos.sh    builds .app + .dmg, signs
-build-windows.bat builds .exe
-flowlite/
-  paths.py        cross-platform app directories
-  config.py       persisted settings
-  models.py       model catalog, per-engine download specs
-  download.py     model fetching with progress
-  audio.py        microphone capture
-  speech.py       silence gating, hallucination filtering, text cleanup
-  inject.py       clipboard + paste keystroke, per-platform
-  hotkey.py       global hotkey, tap vs hold state machine
-  permissions.py  macOS Accessibility / Microphone checks
-  controller.py   ties it all together
-  backends/       whisper.cpp and faster-whisper engines
-  ui/             tray, overlay, settings window
-tests/            state machine and gating tests
+cmd/flowlite/        entry point
+internal/cli/        every command
+internal/daemon/     key → sound → pill → record → transcribe → paste
+internal/whisper/    thin cgo wrapper over whisper.h (loads ggml's backend plugins)
+internal/hotkey/     tap-vs-hold state machine (tested) + CGEventTap / WH_KEYBOARD_LL
+internal/overlay/    the pill: NSPanel (macOS), layered GDI window (Windows)
+internal/sound/      synthesised cues, one persistent output stream
+internal/audio/      16 kHz mono capture via miniaudio
+internal/speech/     silence gate, hallucination filter, segment join (tested)
+internal/inject/     clipboard + paste keystroke
+internal/catalog/    model table, resumable download
+internal/config/     ~/Library/Application Support/FlowLite/config.json
+internal/mainloop/   AppKit run loop bridge / Win32 message loop
+scripts/             Windows deps fetcher
 ```
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+make test
 ```
 
-26 tests cover the tap/hold state machine and the silence gating. Neither
-needs a microphone, a model download, or Accessibility permission.
+Pure-Go tests for the gesture machine and the speech gate run anywhere. The
+whisper test loads a downloaded model, synthesises speech with macOS `say`,
+transcribes it and asserts Metal was used; it skips where that is not possible.
 
-## What ships in the bundle
+## Recovering the previous version
 
-PySide6 bundles 145 Qt frameworks; FlowLite uses three. The build spec
-excludes the rest — QtWebEngineCore alone is an entire Chromium at 602 MB —
-and leaves out `faster-whisper`'s 138 MB dependency chain, since the fallback
-engine is an optional extra rather than part of the shipped app.
+The original Python/PySide6 implementation is tagged: `git checkout python-v0.1.0`.
 
-| | Size |
-| --- | --- |
-| Unstripped dev environment | 1.4 GB |
-| `FlowLite.app` | 128 MB |
-| `FlowLite.dmg` (compressed) | 57 MB |
+## License
 
-## Not yet built
-
-- LLM cleanup of filler words and grammar (planned for v2)
-- Notarised, Developer-ID-signed releases
-- Custom vocabulary for names and jargon
-- Launch at login
+MIT.
