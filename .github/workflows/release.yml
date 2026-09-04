@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish v${{ steps.ver.outputs.version }}
+    name: Build and publish
     runs-on: macos-14   # Apple Silicon runner; Metal is compiled in, not needed at build time
     steps:
       - uses: actions/checkout@v4
