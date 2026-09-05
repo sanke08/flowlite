@@ -17,15 +17,14 @@ func (p *Player) StartWorking() {
 	stop := make(chan struct{})
 	p.workStop = stop
 	go func() {
-		// 150ms: brisk enough to read as "working", but each 21ms tick is
-		// still heard as its own event. 50ms (twenty ticks a second) fused
-		// into one buzzing tone; 380ms felt sluggish next to a transcription
-		// that usually finishes in well under a second.
-		t := time.NewTicker(150 * time.Millisecond)
+		// 65ms: a fast ticking ring, ~15 ticks a second. Each 30ms tick is
+		// still separated by silence so it reads as ticks, not a tone; at
+		// 50ms and below they fuse into one buzz.
+		t := time.NewTicker(65 * time.Millisecond)
 		defer t.Stop()
 		// First tick lands just after the Stop cue finishes, not on top of it.
 		select {
-		case <-time.After(260 * time.Millisecond):
+		case <-time.After(220 * time.Millisecond):
 		case <-stop:
 			return
 		}

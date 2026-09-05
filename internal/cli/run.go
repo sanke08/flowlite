@@ -100,15 +100,28 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 		logger.Printf("reloading")
 		d.Close() // waits for a transcription in flight; releases the key tap
 		removePID()
-		// d.Close just tore down this pid's CoreAudio output device; exec-ing
-		// immediately hands the (same pid, fresh image) process a new one
-		// before the OS has necessarily finished releasing the old
-		// registration, which is heard as a stuttering or missing first cue.
-		// A cold-started daemon never hits this — there the old pid is a
-		// separate, already-dying process, not this one an instant ago.
-		// Nothing waits on this reload from the caller's side (reload(pid)
-		// signals and returns immediately), so there is no cost to erring
-		// generous rather than shaving this to the minimum that seemed to work.
+		if detached {
+			// Background mode: hand over to a brand-new process and exit,
+			// rather than exec-ing a fresh image into this same pid. A
+			// same-pid exec was measured to make the new image's Metal
+			// startup take 8-18s (ggml_metal_library_init blocking on the
+			// Metal compiler service, which still holds this pid's previous
+			// session) against ~0.3s for a fresh pid — long enough that
+			// `settings` reported "did not come back". The Accessibility
+			// grant follows the binary, not the pid, so a new detached
+			// process keeps it exactly as `flowlite` (start) does.
+			if _, err := spawnDaemon(); err != nil {
+				logger.Printf("reload failed: %v", err)
+			}
+			stop()
+			return
+		}
+		// Foreground (`--no-paste`) keeps the in-place exec: the terminal
+		// tab, and the terminal app's responsibility for the Accessibility
+		// grant, both survive only if this very process lives on. d.Close
+		// just tore down this pid's CoreAudio output device; give the OS a
+		// moment to release it before the fresh image asks for a new one, or
+		// the first cue is heard stuttering or missing.
 		time.Sleep(500 * time.Millisecond)
 		if err := reexecSelf(); err != nil {
 			logger.Printf("reload failed: %v", err)
@@ -179,31 +192,19 @@ func startBackground() error {
 	if !configured(cfg) {
 		return errors.New("no model installed yet — run: flowlite")
 	}
-	exe, err := os.Executable()
+	c, err := spawnDaemon()
 	if err != nil {
 		return err
 	}
 	lp, _ := config.LogPath()
-	logf, err := os.OpenFile(lp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer logf.Close()
-
-	c := exec.Command(exe, "--daemon")
-	c.Stdout, c.Stderr = logf, logf
-	detach(c)
-	if err := c.Start(); err != nil {
-		return err
-	}
-	// Give the model a moment to load so a failure shows up here. 15s: the
+	// Give the model a moment to load so a failure shows up here. 45s: the
 	// same budget stopBackground and waitForReload give — this is the same
 	// daemon.New a cold start runs, which on a first run can block on the
 	// macOS microphone-permission dialog and then a model load plus warm-up
 	// (the README documents 15+ seconds for that alone).
 	spin := startSpinner("starting…")
 	defer spin.Stop()
-	for i := 0; i < 150; i++ {
+	for range 450 {
 		time.Sleep(100 * time.Millisecond)
 		if _, running := daemonRunning(); running {
 			spin.Stop()
@@ -212,6 +213,30 @@ func startBackground() error {
 		}
 	}
 	return fmt.Errorf("the daemon did not come up; see %s", shortenHome(lp))
+}
+
+// spawnDaemon starts `flowlite --daemon` as a detached process logging to
+// the log file, and returns without waiting for it. Shared by `flowlite`
+// (start) and by a background daemon reloading itself.
+func spawnDaemon() (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	lp, _ := config.LogPath()
+	logf, err := os.OpenFile(lp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	defer logf.Close() // the child holds its own descriptor after Start
+
+	c := exec.Command(exe, "--daemon")
+	c.Stdout, c.Stderr = logf, logf
+	detach(c)
+	if err := c.Start(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // stopBackground terminates whichever daemon the pidfile points at — the
@@ -370,10 +395,12 @@ func waitForReload(what string) error {
 	defer spin.Stop()
 
 	sawGone := false
-	// 15s: the same budget stopBackground already gives a shutdown: this is
-	// the same daemon.New a cold start runs (model, sounds, hotkey), which is
-	// exactly what that budget was sized for.
-	for range 150 {
+	// 45s. A cold start loads the model in ~0.3s, but a re-exec'd process
+	// has been seen to take 8-15s over the same load (see the log's "model …
+	// ready" line after "reloading"), and a 15s budget turned that into a
+	// false "did not come back" while the daemon was in fact seconds from
+	// listening. The wait is cheap; a wrong error is not.
+	for range 450 {
 		time.Sleep(100 * time.Millisecond)
 		pid, running := daemonRunning()
 		if !running {

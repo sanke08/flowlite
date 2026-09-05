@@ -34,18 +34,43 @@ extern void flowliteHistoryClosed(void);
 #define BAR_W         3.0
 #define BAR_GAP       3.0
 #define FPS          60.0
-#define FADE_IN       0.16
-#define FADE_OUT      0.20
+#define FADE_IN       0.14
+#define FADE_OUT      0.24
 #define ERROR_HOLD    0.70   // two red pulses, then fade
 
-// The plain pill's show/hide slide offset is driven by a small, lightly
-// underdamped spring (not an eased curve) so arriving/departing reads as a
-// soft pop rather than a flat slide — a ~1-2pt overshoot that settles within
-// ~300ms. Tuned by simulation: k=600/c=21 gives ~1.1pt overshoot over the
-// 6pt travel distance below, settling in ~0.3s. Alpha's fade stays a plain
-// ease (see tick()) — opacity doesn't read as "springy," position does.
-#define SLIDE_STIFFNESS  600.0
-#define SLIDE_DAMPING     21.0
+// The pill's arrival and departure are two coupled springs, not eased curves,
+// so it reads as something soft settling onto the screen rather than a panel
+// sliding in:
+//   slide — the offset along `inward` from the resting spot. Starts 14pt
+//           toward the edge and glides in over ~0.35s.
+//   pop   — a scale factor around the pill's centre, from 0.80 to 1. The part
+//           of any overshoot above 1 is not drawn as growth (the window is
+//           exactly pill-sized, it would clip) but as a slight *squash*
+//           across the direction of motion, so it lands softly.
+//   stretch — while moving fast it elongates a little along the motion axis
+//           and thins across it, in proportion to slide velocity: liquid,
+//           not a rigid sticker.
+// Both springs sit just under critical damping (zeta ≈ 0.8): a visible
+// overshoot means the pill stops dead at the peak and reverses, and the eye
+// reads that as a hitch ("comes, sticks, comes"). Near-critical keeps one
+// continuous deceleration with only a hint of settle at the end.
+// Alpha stays a plain ease: opacity does not read as springy, shape does.
+#define SLIDE_STIFFNESS  300.0
+#define SLIDE_DAMPING     28.0
+#define SLIDE_TRAVEL      14.0   // pt the pill starts/ends toward the edge
+#define POP_STIFFNESS    300.0
+#define POP_DAMPING       26.0
+#define POP_FROM           0.80  // scale the pill appears/leaves at
+#define POP_SQUASH         0.80  // how much of the >1 overshoot becomes squash
+#define STRETCH_GAIN       0.0006 // scale per pt/s of slide velocity
+#define STRETCH_MAX        0.06
+
+// Shared between the panel's tick() (which integrates the springs) and
+// FLPillView's drawRect (which applies them as a transform). Tentative
+// definitions; the panel section below defines the rest of the layout state.
+static double  slidePos  = 0, slideVel = 0;
+static double  popPos    = 1, popVel   = 0;
+static NSPoint inward;
 
 // The label only ever appears for the terminal Error state, and only grows
 // the pill's own footprint enough to hold a short (1-3 word) status without
@@ -143,6 +168,26 @@ static void approach(double *v, double want, double dt, double tau) { *v += (wan
     }
     double cx = NSMidX(core), cy = NSMidY(core);
 
+    // ---- liquid pop transform ------------------------------------------
+    // Scale around the pill's own centre. Along the motion axis: the pop
+    // (capped at 1) plus velocity stretch. Across it: the pop minus the
+    // squash that the >1 overshoot turns into, minus the same stretch.
+    // Neither axis ever exceeds 1, so nothing is clipped by the window.
+    {
+        double over    = fmax(popPos - 1.0, 0.0);
+        double base    = fmin(popPos, 1.0);
+        double stretch = fmin(fabs(slideVel) * STRETCH_GAIN, STRETCH_MAX);
+        double along   = fmin(1.0, base + stretch * (1.0 - base + 0.15));
+        double across  = fmax(0.6, base - POP_SQUASH * over - stretch);
+        BOOL   moveX   = fabs(inward.x) > fabs(inward.y);
+        double sx = moveX ? along : across, sy = moveX ? across : along;
+        NSAffineTransform *tf = [NSAffineTransform transform];
+        [tf translateXBy:NSMidX(b) yBy:NSMidY(b)];
+        [tf scaleXBy:sx yBy:sy];
+        [tf translateXBy:-NSMidX(b) yBy:-NSMidY(b)];
+        [tf concat];
+    }
+
     // ---- body -----------------------------------------------------------
     NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(b, 0.5, 0.5)
                                                          xRadius:RADIUS yRadius:RADIUS];
@@ -238,11 +283,10 @@ static FLPillView *view  = nil;
 static NSTimer    *timer = nil;
 static double      shownAt = 0;   // fade-in start
 static double      hideAt  = 0;   // >0 while fading out (may be in the future)
-static double      slidePos   = 0;   // spring position of the pop in/out slide offset
-static double      slideVel   = 0;   // spring velocity for slidePos
-static double      slideLastT = 0;   // previous tick() time, for this spring's own dt
+static double      slideLastT = 0;   // previous tick() time, for the springs' own dt
 static NSPoint     baseOrigin;
-static NSPoint     inward;        // unit vector pointing away from the screen edge
+// slidePos/slideVel/popPos/popVel/inward are defined near the top of the
+// file so FLPillView can read them.
 
 static double      checkAt = 0;   // >0: verify the Space assignment at this time
 
@@ -447,10 +491,12 @@ static void tick(void) {
 
     double alpha = easeOut((t - shownAt) / FADE_IN);
     double slideTarget = 0;                              // resting position, onscreen
+    double popTarget   = 1.0;
     if (hideAt > 0) {
         double f = easeInOut((t - hideAt) / FADE_OUT);
         alpha *= (1.0 - f);
-        slideTarget = -4.0 * f;                          // drifts back toward the edge
+        slideTarget = -SLIDE_TRAVEL;                     // springs back toward the edge
+        popTarget   = POP_FROM;                          // and shrinks as it goes
         if (f >= 1.0) {
             [panel orderOut:nil];
             view->state = ST_HIDDEN;
@@ -471,6 +517,9 @@ static void tick(void) {
     double accel = -SLIDE_STIFFNESS * (slidePos - slideTarget) - SLIDE_DAMPING * slideVel;
     slideVel += accel * dt;
     slidePos += slideVel * dt;
+    double paccel = -POP_STIFFNESS * (popPos - popTarget) - POP_DAMPING * popVel;
+    popVel += paccel * dt;
+    popPos += popVel * dt;
 
     [panel setAlphaValue:alpha];
     [panel setFrameOrigin:NSMakePoint(baseOrigin.x + inward.x * slidePos, baseOrigin.y + inward.y * slidePos)];
@@ -534,8 +583,10 @@ void flowlite_overlay_show(int state, const char *text) {
             // Seed the slide spring fresh so a rapid re-show never carries
             // stale velocity into a new appearance: starts off the edge,
             // at rest, same as the old flat ease's initial position.
-            slidePos = -6.0;
+            slidePos = -SLIDE_TRAVEL;
             slideVel = 0;
+            popPos = POP_FROM;
+            popVel = 0;
             slideLastT = 0;
             reposition();
             applyTraits(panel);

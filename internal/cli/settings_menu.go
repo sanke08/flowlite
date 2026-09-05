@@ -352,7 +352,7 @@ func changePill(cfg *config.Config) (bool, error) {
 	preview := true
 	if err := huh.NewConfirm().
 		Title("Preview?").
-		Description("Shows the pill at the " + pos + " for a few seconds.").
+		Description("Runs one pretend dictation at the " + pos + ": the pill, its animation and the sound cues.").
 		Affirmative("Yes").Negative("No").Value(&preview).Run(); err != nil {
 		return false, err
 	}
