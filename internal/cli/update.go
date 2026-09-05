@@ -257,14 +257,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("%s updated %s → %s\n", ok("✓"), Version, rel.TagName)
-	if _, running := daemonRunning(); running {
-		fmt.Println(dim("  restarting FlowLite so it runs the new version…"))
-		if err := stopBackground(); err != nil {
-			return err
-		}
-		if err := startBackground(); err != nil {
-			return err
-		}
+	if err := applyToRunningDaemon("the new version"); err != nil {
+		return err
 	}
 	return nil
 }

@@ -156,12 +156,22 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// means two pastes per dictation.
 	if pid, running := daemonRunning(); running {
 		fmt.Printf("FlowLite is already listening (pid %d).\n", pid)
-		fmt.Println(dim("  stop it with Ctrl+C in that window, or:  flowlite stop"))
+		fmt.Println(dim("  stop it with:  flowlite stop"))
 		return nil
 	}
 
-	// 5. Dictate.
-	return runDaemon(cfg, rootDaemon, rootNoPaste)
+	// 5. Dictate. FlowLite always runs in the background: closing the terminal
+	// or pressing Ctrl+C in it must never take dictation away, because by then
+	// it is part of how the user types. `flowlite stop` is the way to stop it.
+	//
+	// Two exceptions run here in the foreground instead. --daemon *is* the
+	// background process, spawned by startBackground. --no-paste exists to
+	// print transcripts instead of pasting them, which needs a terminal to
+	// print to.
+	if rootDaemon || rootNoPaste {
+		return runDaemon(cfg, rootDaemon, rootNoPaste)
+	}
+	return startBackground()
 }
 
 // configured reports whether setup has finished: a model is chosen and its

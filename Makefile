@@ -52,12 +52,13 @@ install: release ## Install the self-contained binary to $(PREFIX)/bin
 # $(BINARY) — so a local build replaces the downloaded one in place. There is
 # never a second copy for PATH to pick the wrong one from.
 
-dev: build       ## Fast loop: build, install, run in the FOREGROUND (Ctrl+C quits)
+dev: build       ## Fast loop: build, install, and put the new binary live
 	@install -d $(PREFIX)/bin
 	@install -m 0755 bin/$(BINARY) $(PREFIX)/bin/$(BINARY)
 	@echo "installed $(PREFIX)/bin/$(BINARY) ($(VERSION))"
 	-@$(PREFIX)/bin/$(BINARY) stop
 	@$(PREFIX)/bin/$(BINARY)
+	@echo "watch it:  tail -f \"$$HOME/Library/Application Support/FlowLite/flowlite.log\""
 
 run: install     ## The real release binary, installed and started in the background
 	@$(MAKE) --no-print-directory restart
@@ -72,6 +73,11 @@ uninstall:
 clean:
 	rm -rf bin dist
 
+# The whisper.cpp version pins live in one file so the macOS static build
+# and the Windows DLL fetch (a differently-named tag for the same release)
+# cannot silently drift apart — see third_party/whisper-version.mk.
+include third_party/whisper-version.mk
+
 # Cross-link a Windows binary from macOS to prove the Windows code compiles
 # and links. It cannot be run here. Needs: brew install mingw-w64, and the
 # whisper.cpp release DLLs + headers under third_party/windows (see README).
@@ -80,6 +86,7 @@ WINDIR  := third_party/windows
 # whitespace and ignores quoting), so the deps are reached through a symlink
 # at a space-free location.
 WINLINK := $(HOME)/.cache/flowlite-windeps
+windows: WHISPERV := $(WCPP_WIN_TAG)
 windows:
 	@test -d $(WINDIR)/include || { echo "missing $(WINDIR)/include — see README 'Windows build'"; exit 1; }
 	@mkdir -p $(HOME)/.cache dist/windows
@@ -97,7 +104,6 @@ windows:
 # Statically links whisper.cpp + ggml (Metal library embedded) so the result is
 # ONE file that runs on any Apple Silicon Mac with nothing installed.
 WCPP     := third_party/whisper.cpp
-WCPP_TAG := v1.9.3
 # Oldest macOS the shared binary should run on. Without this the build is
 # stamped with the *builder's* macOS version and refuses to start elsewhere.
 MACOS_MIN := 13.0

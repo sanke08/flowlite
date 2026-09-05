@@ -20,6 +20,7 @@ import (
 	"github.com/sanke08/flowlite/internal/inject"
 	"github.com/sanke08/flowlite/internal/mainloop"
 	"github.com/sanke08/flowlite/internal/overlay"
+	"github.com/sanke08/flowlite/internal/permissions"
 	"github.com/sanke08/flowlite/internal/sound"
 	"github.com/sanke08/flowlite/internal/speech"
 	"github.com/sanke08/flowlite/internal/whisper"
@@ -67,8 +68,16 @@ type Daemon struct {
 	// never confirmed (a lone tap) has no pill, so finish must raise one
 	// before setting its state.
 	pillUp atomic.Bool
+	// closing is set the moment shutdown starts, so a transcription already
+	// running knows not to paste or touch the pill on its way out.
+	closing atomic.Bool
+	// recGen counts start() calls. A microphone open that fails hands its
+	// error back asynchronously (see start); recGen lets that handler tell
+	// whether the gesture it was opening for is still the current one, or
+	// was already superseded by a newer press.
+	recGen atomic.Uint64
 
-	busy sync.Mutex // serialises transcriptions
+	busy sync.Mutex // serialises transcriptions and paste-last against Close
 
 	// NoPaste skips the paste keystroke: transcripts only go to Transcribed.
 	NoPaste bool
@@ -80,6 +89,18 @@ type Daemon struct {
 // New loads the model and opens the audio devices. It does not touch the
 // keyboard yet; that happens in Run, on the main thread.
 func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
+	// The microphone permission has to be settled before anything else: a
+	// denied microphone does not make recording fail, it makes it return
+	// silence, so without this the daemon starts, listens, shows the pill and
+	// transcribes nothing — with no error anywhere. Ask now, while the user is
+	// looking at the terminal, rather than on the first key press.
+	if st := permissions.Mic(); st == permissions.MicUnknown {
+		permissions.RequestMic()
+	}
+	if st := permissions.Mic(); !st.OK() {
+		return nil, errors.New(st.Hint())
+	}
+
 	m, ok := catalog.Get(cfg.Model)
 	if !ok || !m.Downloaded() {
 		return nil, errors.New("no model installed — run `flowlite setup`")
@@ -129,7 +150,17 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 		events:  make(chan hotkey.KeyEvent, 64),
 		hist:    hist,
 	}
+	mainloop.OnWake(d.wake)
 	return d, nil
+}
+
+// wake runs after the system wakes from sleep. Closing the lid suspends the
+// output device the sound Player has held open since New; macOS does not
+// hand it back in a working state on its own, so without this cues silently
+// stop playing (or stutter) after the machine wakes until the process is
+// restarted.
+func (d *Daemon) wake() {
+	d.player.Reopen()
 }
 
 // Run installs the hotkey and processes events until ctx is cancelled.
@@ -170,9 +201,21 @@ func (d *Daemon) Close() {
 	if d.rec.Recording() {
 		d.rec.Cancel()
 	}
+	// Tell a transcription in flight to stop short of pasting. The user has
+	// quit; dropping text into whatever window they switch to a second later
+	// is worse than not pasting at all. It is still written to history, so a
+	// triple tap or `flowlite last` gets it back.
+	d.closing.Store(true)
+	// Then wait for it, so whisper_free never lands under a running
+	// whisper_full. Model.Close would block on its own lock anyway; taking
+	// busy here also stops a queued transcribe starting against a dying model.
+	d.busy.Lock()
+	d.model.Close()
+	d.busy.Unlock()
+	// Sounds and the pill go last: transcribe reaches for both on its way out,
+	// and closing them first is a race against a goroutine we just waited for.
 	d.player.Close()
 	overlay.Hide()
-	d.model.Close()
 }
 
 // ---- state --------------------------------------------------------------
@@ -237,15 +280,36 @@ func (d *Daemon) start() {
 		d.rec.Cancel()
 		d.setState(Idle)
 	}
-	if err := d.rec.Start(); err != nil {
-		d.log.Printf("microphone: %v", err)
-		d.machine.Reset()
-		d.show(overlay.Error, "Microphone unavailable")
-		d.player.Play(sound.Error)
-		d.hideAfter(holdError)
+	// Opening the microphone touches CoreAudio/WASAPI and can take on the
+	// order of 100ms — long enough that doing it here would stall the event
+	// loop and delay every other key event behind it, on every single press.
+	// Recording state is set optimistically instead, and the open runs in
+	// its own goroutine; Recorder serialises Start against Stop/Cancel
+	// internally, so a gesture that resolves before the device finishes
+	// opening waits out that same brief window rather than every press
+	// paying for it up front.
+	gen := d.recGen.Add(1)
+	d.setState(Recording)
+	go func() {
+		if err := d.rec.Start(); err != nil {
+			d.log.Printf("microphone: %v", err)
+			d.micFailed(gen)
+		}
+	}()
+}
+
+// micFailed rolls back a start() whose microphone never actually opened. gen
+// guards against a newer gesture having already begun by the time the error
+// comes back — that one is not this handler's to touch.
+func (d *Daemon) micFailed(gen uint64) {
+	if d.recGen.Load() != gen {
 		return
 	}
-	d.setState(Recording)
+	d.machine.Reset()
+	d.setState(Idle)
+	d.show(overlay.Error, "Microphone unavailable")
+	d.player.Play(sound.Error)
+	d.hideAfter(holdError)
 }
 
 // confirm is the moment a hold or a double-tap makes the recording real:
@@ -272,6 +336,13 @@ func (d *Daemon) finish() {
 	}
 
 	if !speech.HasSpeech(samples) {
+		// Silence and a revoked microphone are indistinguishable in the
+		// samples, so check which one it was before blaming the user.
+		if st := permissions.Mic(); !st.OK() {
+			d.log.Printf("microphone: %s", st.Hint())
+			d.settle(overlay.Error, "Microphone blocked", sound.Error, holdError)
+			return
+		}
 		d.settle(overlay.Cancelled, "Nothing heard", sound.Cancel, holdCancelled)
 		return
 	}
@@ -325,6 +396,28 @@ func (d *Daemon) pasteLast() {
 		d.setState(Idle)
 		return
 	}
+	// inject.Paste blocks: ~50ms before the keystroke so the OS registers the
+	// new clipboard owner, and up to 600ms after restoring the old clipboard
+	// contents. Running that here would stall the daemon's whole event loop
+	// — no key events processed, no ticks — for as long as it takes, so the
+	// next hold-to-talk would only register once this triple tap's paste
+	// finally finishes.
+	go d.pasteLastNow(last)
+}
+
+func (d *Daemon) pasteLastNow(last history.Entry) {
+	// Hold busy for the same reason transcribe does: Close must not return —
+	// and let the process exit — while this is still mid-paste, or the
+	// clipboard restore it's waiting on never gets to run.
+	d.busy.Lock()
+	defer d.busy.Unlock()
+	if d.closing.Load() {
+		// Shutting down. The entry is already in history; nothing new to
+		// paste into whatever the user has switched to on their way out.
+		d.setState(Idle)
+		return
+	}
+
 	label := "Pasted again"
 	if d.NoPaste {
 		label = "Last transcript"
@@ -353,6 +446,22 @@ func (d *Daemon) transcribe(samples []float32) {
 	t0 := time.Now()
 	segs, err := d.model.Transcribe(samples, whisper.Options{Language: d.cfg.Language})
 	d.player.StopWorking()
+	if d.closing.Load() {
+		// Shutting down. Keep the words, but do not paste them into whatever
+		// has focus now, and do not raise the pill after it has been hidden.
+		if err == nil {
+			if text := speech.Finalise(segs); text != "" {
+				d.remember(history.Entry{
+					Time:         time.Now(),
+					Text:         text,
+					Pasted:       false,
+					AudioSeconds: float64(len(samples)) / audio.SampleRate,
+				})
+				d.log.Printf("shutting down: %d chars kept in history, not pasted", len(text))
+			}
+		}
+		return
+	}
 	if err != nil {
 		d.log.Printf("transcription failed: %v", err)
 		d.settle(overlay.Error, "Transcription failed", sound.Error, holdError)

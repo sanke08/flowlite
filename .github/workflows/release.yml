@@ -1,21 +1,29 @@
 # Automatic releases.
 #
 # Every push to main that touches actual code builds the self-contained macOS
-# binary and the Windows zip on GitHub's machines, bumps VERSION's patch
-# number, creates the tag and a GitHub Release with both attached plus a
-# SHA256SUMS file. The curl installer and `flowlite update` pick it up at once.
+# binary and the Windows zip on GitHub's machines, creates the tag and a GitHub
+# Release with both attached plus a SHA256SUMS file. The curl installer and
+# `flowlite update` pick it up at once.
 #
-# Pushes whose only change is VERSION itself (this workflow's own bump commit)
-# or a *.md file / workflow edit are ignored, so the bump commit doesn't
-# re-trigger itself and doc-only edits don't ship a release. Free for public
-# repos.
+# The version is decided one of two ways:
+#
+#   * Normally VERSION still names the release that already shipped, so the
+#     patch number is bumped for you: 0.4.8 -> 0.4.9 -> 0.4.10. You never have
+#     to think about it.
+#   * If you edit VERSION by hand to a number that has no tag yet, that number
+#     is released instead. This is the only way to reach a new minor or major,
+#     so `echo 1.0.0 > VERSION` is a deliberate act and nothing can do it by
+#     accident. A version that is not newer than the latest tag is rejected.
+#
+# Doc-only edits and workflow edits ship nothing. The bump commit cannot
+# re-trigger the workflow: pushes made with GITHUB_TOKEN never do, and it
+# carries [skip ci] as well. Free for public repos.
 name: Release
 
 on:
   push:
     branches: [main]
     paths-ignore:
-      - "VERSION"
       - "**.md"
       - ".github/**"
   workflow_dispatch:
@@ -36,21 +44,49 @@ jobs:
         with:
           fetch-depth: 0   # tags are needed to compute the next version
 
-      - name: Bump VERSION and tag, so the binary reports the exact version
+      - name: Decide the version, then tag it
         id: ver
         run: |
-          latest=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-          latest=${latest:-v0.0.0}
-          IFS='.' read -r major minor patch <<< "${latest#v}"
-          next="v${major}.${minor}.$((patch + 1))"
-          echo "$next" is next, bumping from "$latest"
-
-          echo "${next#v}" > VERSION
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "$next"
-          git tag -a "$next" -m "FlowLite $next"
 
+          # `|| true`: with pipefail, grep finding nothing in a repo that has no
+          # tags yet would abort the step before the fallback on the next line.
+          latest=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          latest=${latest:-v0.0.0}
+          # Keep only digits and dots, so a BOM or stray whitespace an editor
+          # added cannot produce a rejection message that looks identical to a
+          # valid version.
+          want="v$(tr -cd '0-9.' < VERSION)"
+
+          if [ -n "$(git tag -l "$want")" ]; then
+            # VERSION still names a release that already shipped, so this is an
+            # ordinary code push: bump the patch, exactly as before.
+            IFS='.' read -r major minor patch <<< "${latest#v}" || true
+            next="v${major}.${minor}.$((patch + 1))"
+            echo "routine release: $latest -> $next"
+            echo "${next#v}" > VERSION
+            # [skip ci] is belt and braces: a push made with GITHUB_TOKEN does
+            # not trigger workflows anyway, so this commit cannot loop.
+            git commit -am "$next [skip ci]"
+          else
+            # VERSION names something that has never been tagged, which only
+            # happens when a human edited it. That is the one way to reach a new
+            # minor or major, so honour exactly what they asked for.
+            if ! echo "${want#v}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::VERSION must be X.Y.Z, got '${want#v}'"
+              exit 1
+            fi
+            if [ "$(printf '%s\n%s\n' "${latest#v}" "${want#v}" | sort -V | tail -1)" != "${want#v}" ]; then
+              echo "::error::VERSION ($want) is not newer than the latest tag ($latest)"
+              exit 1
+            fi
+            next="$want"
+            echo "hand-set release: $latest -> $next"
+          fi
+
+          git tag -a "$next" -m "FlowLite $next"
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5

@@ -91,6 +91,19 @@ func PIDPath() (string, error) {
 	return filepath.Join(d, "flowlite.pid"), nil
 }
 
+// ModePath is where the running daemon records whether it is a foreground
+// session or a detached one. It is deliberately a separate file: the pidfile's
+// format is read by every version ever installed, and an older binary that
+// finds something it cannot parse there concludes nothing is running and
+// starts a second daemon — two event taps, two pastes per dictation.
+func ModePath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "flowlite.mode"), nil
+}
+
 // Load reads config.json, returning defaults when it does not exist.
 func Load() (*Config, error) {
 	p, err := Path()

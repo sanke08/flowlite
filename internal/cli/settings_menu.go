@@ -121,14 +121,8 @@ func runSettingsMenu(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 	if changed {
-		if _, running := daemonRunning(); running {
-			fmt.Println(dim("Applying changes — restarting FlowLite…"))
-			if err := stopBackground(); err != nil {
-				return err
-			}
-			if err := startBackground(); err != nil {
-				return err
-			}
+		if err := applyToRunningDaemon("your new settings"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -549,7 +543,7 @@ func daemonMenu() (menuResult, error) {
 	)
 	_, running := daemonRunning()
 	var opts []huh.Option[string]
-	desc := "Runs FlowLite detached from this terminal, logging to a file. Ctrl+C in a tab is simpler and keeps the permission stable."
+	desc := "FlowLite always runs in the background. Stop it, start it, or restart it here."
 	if running {
 		opts = []huh.Option[string]{
 			huh.NewOption("Stop", actStop),

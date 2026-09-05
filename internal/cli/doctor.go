@@ -124,6 +124,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// -- microphone -------------------------------------------------------
+	// The permission first: listing devices does not need it, and neither does
+	// opening one, so without this check every line below can pass while the
+	// microphone delivers nothing but silence.
+	if st := permissions.Mic(); !st.OK() {
+		fail("microphone access", st.Hint())
+	} else {
+		pass("microphone access", "granted")
+	}
+
 	check("microphone", "listing audio devices…")
 	devs, derr := audio.ListDevices()
 	switch {

@@ -38,6 +38,7 @@ const (
 	Tapped               // one quick tap; waiting for a second within TapWindow
 	DoubleTapped         // two quick taps; waiting out the window for a third
 	HandsFree            // double-tap confirmed; recording with nothing held
+	TripleTapped         // third tap is down; waiting for release before pasting
 )
 
 func (g Gesture) String() string {
@@ -54,6 +55,8 @@ func (g Gesture) String() string {
 		return "double-tapped"
 	case HandsFree:
 		return "hands-free"
+	case TripleTapped:
+		return "triple-tapped"
 	}
 	return "?"
 }
@@ -75,7 +78,10 @@ const (
 	StartHandsFree
 	// Finish: stop recording and transcribe what was captured.
 	Finish
-	// PasteLast: triple tap. Throw away the tiny recording and paste the
+	// PasteLast: triple tap. Fires on the third tap's release, not its
+	// press — the hotkey is itself a modifier key, and posting the Cmd+V
+	// paste while it is still physically held risks the target app reading
+	// it as Cmd+<modifier>+V. Throw away the tiny recording and paste the
 	// previous transcript again.
 	PasteLast
 	// Discard: a lone tap, or Esc before the gesture was confirmed. Drop the
@@ -150,7 +156,7 @@ func (m *Machine) Press(k KeyKind) Event {
 		switch m.state {
 		case Idle:
 			return None
-		case Undecided, Tapped, DoubleTapped:
+		case Undecided, Tapped, DoubleTapped, TripleTapped:
 			m.Reset()
 			return Discard // nothing was ever confirmed to the user
 		}
@@ -174,10 +180,15 @@ func (m *Machine) Press(k KeyKind) Event {
 			// Expire was not called in time; this is a fresh gesture and
 			// the daemon's Start replaces the stale recording.
 		case DoubleTapped:
-			m.state = Idle
 			if now.Sub(m.releasedAt) <= m.tapWindow {
-				return PasteLast // third tap
+				// Third tap key-down. Wait for its release before firing
+				// PasteLast: the hotkey is still physically pressed here,
+				// and posting Cmd+V while it is down is what risks the
+				// stray modifier (see PasteLast's doc comment).
+				m.state = TripleTapped
+				return None
 			}
+			m.state = Idle
 			// Expire was missed: hands-free was effectively running, so
 			// this press stops it.
 			return Finish
@@ -214,6 +225,10 @@ func (m *Machine) Release(k KeyKind) Event {
 	case DoubleTapped:
 		// The second tap's release opens the window for a third.
 		m.releasedAt = now
+	case TripleTapped:
+		// The hotkey is up now, so the paste is safe to post.
+		m.state = Idle
+		return PasteLast
 	}
 	return None
 }

@@ -35,6 +35,9 @@ func init() {
 var (
 	runOnce sync.Once
 	stopped chan struct{}
+
+	wakeMu  sync.Mutex
+	wakeFns []func()
 )
 
 // Run prepares NSApplication, starts `ready` on its own goroutine and blocks
@@ -75,4 +78,24 @@ func flowliteMainloopCall(h C.uintptr_t) {
 	handle := cgo.Handle(h)
 	handle.Value().(func())()
 	handle.Delete()
+}
+
+// OnWake registers fn to run whenever the system wakes from sleep — the
+// signal that anything holding a CoreAudio device needs to check it still
+// actually works. fn runs on its own goroutine, not the main thread; call
+// Dispatch from inside it if it needs AppKit.
+func OnWake(fn func()) {
+	wakeMu.Lock()
+	wakeFns = append(wakeFns, fn)
+	wakeMu.Unlock()
+}
+
+//export flowliteMainloopWake
+func flowliteMainloopWake() {
+	wakeMu.Lock()
+	fns := append([]func(){}, wakeFns...)
+	wakeMu.Unlock()
+	for _, fn := range fns {
+		go fn()
+	}
 }

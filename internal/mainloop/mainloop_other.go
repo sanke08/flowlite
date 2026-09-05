@@ -35,3 +35,6 @@ func Dispatch(fn func()) { fn() }
 
 // DispatchSync runs fn immediately.
 func DispatchSync(fn func()) { fn() }
+
+// OnWake has no sleep/wake signal to hook here; fn is never called.
+func OnWake(fn func()) {}

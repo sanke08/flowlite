@@ -2,12 +2,24 @@
 #include <stdint.h>
 
 extern void flowliteMainloopCall(uintptr_t handle);
+extern void flowliteMainloopWake(void);
 
 void flowlite_mainloop_prepare(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         // Accessory: no Dock icon, no menu bar takeover, but windows allowed.
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        // Closing the lid suspends whatever CoreAudio device an open stream
+        // was bound to; it needs to be rebuilt once the machine actually
+        // wakes, not just re-enabled where it was left off.
+        [[[NSWorkspace sharedWorkspace] notificationCenter]
+            addObserverForName:NSWorkspaceDidWakeNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
+                        (void)n;
+                        flowliteMainloopWake();
+                    }];
     }
 }
 

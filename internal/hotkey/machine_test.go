@@ -211,16 +211,36 @@ func TestTripleTapPastesLast(t *testing.T) {
 	evs = append(evs, m.Press(Target))
 	got := onlyEvents(evs)
 	// No StartHandsFree on the way: the pill must never flash before paste.
-	want := []Event{Start, PasteLast}
+	// And PasteLast itself does not fire on this press: the hotkey is a
+	// modifier key, and pasting while it is still down would risk the
+	// target app reading Cmd+V as Cmd+<modifier>+V.
+	want := []Event{Start}
 	if !equal(got, want) {
 		t.Fatalf("triple tap = %v, want %v", got, want)
 	}
-	expectState(t, m, Idle)
-	expect(t, "third release", m.Release(Target), None)
-	// However long that third press is held, nothing else fires.
+	expectState(t, m, TripleTapped)
+	// However long that third press is held, nothing fires — the paste
+	// waits for the key to actually come up.
 	if evs := tick(m, c, time.Second); len(evs) != 0 {
-		t.Fatalf("expire after paste-last = %v, want nothing", evs)
+		t.Fatalf("expire while third press held = %v, want nothing", evs)
 	}
+	expect(t, "third release", m.Release(Target), PasteLast)
+	expectState(t, m, Idle)
+}
+
+func TestEscapeWhileTripleTapHeldDiscards(t *testing.T) {
+	// Esc pressed while the third tap is still down (waiting for release
+	// before pasting): nothing was confirmed, so it's a discard, not a
+	// cancel of a running recording.
+	m, c := newMachine()
+	tapOnce(m, c)
+	tick(m, c, gap)
+	tapOnce(m, c)
+	tick(m, c, gap)
+	m.Press(Target)
+	expectState(t, m, TripleTapped)
+	expect(t, "esc while third tap held", m.Press(Escape), Discard)
+	expectState(t, m, Idle)
 }
 
 func TestEscapeDuringDoubleTapDiscards(t *testing.T) {

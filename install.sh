@@ -71,6 +71,14 @@ if [ -z "$DIR" ]; then
   DIR="$HOME/.local/bin"
   mkdir -p "$DIR"
 fi
+# Note whether FlowLite is already running, so the new binary can be put live
+# below without the user having to stop and start anything.
+WAS_RUNNING=""
+PIDFILE="$HOME/Library/Application Support/FlowLite/flowlite.pid"
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  WAS_RUNNING=1
+fi
+
 install -m 0755 "$TMP" "$DIR/flowlite"
 xattr -d com.apple.quarantine "$DIR/flowlite" 2>/dev/null || true
 rm -f "$TMP"
@@ -84,7 +92,12 @@ esac
 echo
 # When piped through `sh`, stdin is the script itself, not the keyboard; the
 # setup wizard needs the real terminal. FLOWLITE_NO_SETUP=1 skips it.
-if [ -n "${FLOWLITE_NO_SETUP:-}" ]; then
+if [ -n "$WAS_RUNNING" ]; then
+  # It was already running. `reload` makes it replace itself with the binary we
+  # just installed — same process, same terminal, same permissions — so the
+  # upgrade takes effect with nothing to restart.
+  "$DIR/flowlite" reload || echo "Run this to pick up the new version:  flowlite reload"
+elif [ -n "${FLOWLITE_NO_SETUP:-}" ]; then
   echo "Installed. Next:  flowlite"
 elif [ -x "$DIR/flowlite" ] && [ -r /dev/tty ]; then
   exec "$DIR/flowlite" < /dev/tty

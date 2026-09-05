@@ -109,9 +109,15 @@ func Backends() []string {
 
 // ---- model --------------------------------------------------------------
 
-// Model is a loaded whisper.cpp context. Not safe for concurrent Transcribe
-// calls; the daemon serialises them.
+// Model is a loaded whisper.cpp context.
+//
+// mu guards ctx. whisper_full reads the context for as long as inference runs,
+// so freeing it from another goroutine part-way through is a use-after-free —
+// which is exactly what quitting during a transcription used to do. Holding
+// the lock across both calls makes Close wait for inference to finish, and
+// serialises Transcribe as whisper.cpp requires.
 type Model struct {
+	mu   sync.Mutex
 	ctx  *C.struct_whisper_context
 	path string
 }
@@ -161,8 +167,11 @@ func Load(path string) (*Model, error) {
 // Path is the model file this context was loaded from.
 func (m *Model) Path() string { return m.path }
 
-// Close frees the context. Safe to call twice.
+// Close frees the context, waiting for any transcription in flight. Safe to
+// call twice.
 func (m *Model) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.ctx != nil {
 		C.whisper_free(m.ctx)
 		m.ctx = nil
@@ -172,6 +181,8 @@ func (m *Model) Close() {
 // Transcribe runs 16 kHz mono float32 samples and returns the raw segment
 // texts. Callers pass these through speech.Finalise.
 func (m *Model) Transcribe(samples []float32, opt Options) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.ctx == nil {
 		return nil, errors.New("model is closed")
 	}

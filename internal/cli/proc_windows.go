@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -32,3 +33,12 @@ func terminate(pid int) error {
 	}
 	return p.Kill()
 }
+
+// errNoReload means this platform cannot reload a daemon in place; callers
+// fall back to stopping and starting it, which on Windows costs nothing —
+// there is no Accessibility grant tied to the process here.
+var errNoReload = errors.New("reload in place is not supported on Windows")
+
+func reload(pid int) error { return errNoReload }
+
+func reexecSelf() error { return errNoReload }

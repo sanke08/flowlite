@@ -39,16 +39,15 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(startCmd, stopCmd)
+	rootCmd.AddCommand(startCmd, stopCmd, reloadCmd)
 }
 
-// runDaemon is branch 5 of bare `flowlite`: load the model, install the
-// hotkey and listen until Ctrl+C. detached is the background mode spawned by
-// startBackground — it logs to a file and prints nothing.
+// runDaemon loads the model, installs the hotkey and listens until it is told
+// to stop. detached is the background mode spawned by startBackground — it
+// logs to a file and prints nothing, and it is how FlowLite normally runs.
 //
-// Running in the foreground has one big advantage on macOS: the Accessibility
-// permission attaches to the terminal app, so it is granted once and survives
-// every update. A detached process can lose it.
+// The foreground path is reached only by `--no-paste`, which prints
+// transcripts instead of pasting them and so needs a terminal to print to.
 func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 	var logOut io.Writer = os.Stderr
 	if detached {
@@ -79,13 +78,34 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 		}
 	}
 
-	if err := writePID(); err != nil {
+	if err := writePID(detached); err != nil {
 		logger.Printf("pidfile: %v", err)
 	}
 	defer removePID()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP means "a setting changed, or the binary on disk did": finish
+	// whatever is in flight, then replace this process with a fresh copy of
+	// itself. The pid, the terminal and the permissions all survive, so the
+	// change simply takes effect. Nothing is delivered here on Windows, where
+	// the caller stops and starts the daemon instead.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		if _, open := <-hup; !open {
+			return
+		}
+		logger.Printf("reloading")
+		d.Close() // waits for a transcription in flight; releases the key tap
+		removePID()
+		if err := reexecSelf(); err != nil {
+			logger.Printf("reload failed: %v", err)
+			stop() // could not reload, so shut down rather than run on stale
+		}
+	}()
+	defer signal.Stop(hup)
 
 	if !detached {
 		printBanner(cfg, noPaste)
@@ -121,7 +141,7 @@ func printBanner(cfg *config.Config, noPaste bool) {
 	}
 	key := hotkey.Label(cfg.Hotkey)
 	fmt.Printf("%s   %s\n", bold("FlowLite "+Version+" is listening."), dim(model+" · "+key+" · "+engine))
-	fmt.Printf("  hold %s to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels · Ctrl+C quits\n", bold(key))
+	fmt.Printf("  hold %s to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels\n", bold(key))
 	fmt.Println(dim("  settings: flowlite settings (in another tab)"))
 	if noPaste {
 		fmt.Println(warn("  --no-paste: transcripts are printed here, not pasted"))
@@ -173,8 +193,7 @@ func startBackground() error {
 		time.Sleep(100 * time.Millisecond)
 		if _, running := daemonRunning(); running {
 			spin.Stop()
-			fmt.Printf("%s running in the background (pid %d)\n", ok("✓"), c.Process.Pid)
-			fmt.Println(dim("  log: " + shortenHome(lp) + "    stop it any time: flowlite stop"))
+			printStartedBanner(cfg, c.Process.Pid, lp)
 			return nil
 		}
 	}
@@ -193,7 +212,9 @@ func stopBackground() error {
 	if err := terminate(pid); err != nil {
 		return err
 	}
-	for i := 0; i < 30; i++ {
+	// Shutdown waits for any transcription in flight, so this has to allow
+	// for a slow model finishing a long recording, not just process teardown.
+	for i := 0; i < 150; i++ {
 		time.Sleep(100 * time.Millisecond)
 		if _, still := daemonRunning(); !still {
 			removePID()
@@ -204,18 +225,63 @@ func stopBackground() error {
 	return fmt.Errorf("pid %d did not exit", pid)
 }
 
-func writePID() error {
+// writePID records the pid, and the mode alongside it in a separate file.
+//
+// The pidfile stays exactly "<pid>" — every version of FlowLite ever
+// installed parses it, and one that cannot would decide nothing is running
+// and start a second daemon. The mode goes in a sibling file that older
+// binaries simply never look at.
+func writePID(detached bool) error {
 	p, err := config.PIDPath()
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o644)
+	if err := os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		return err
+	}
+	mode := modeForeground
+	if detached {
+		mode = modeDetached
+	}
+	if mp, err := config.ModePath(); err == nil {
+		_ = os.WriteFile(mp, []byte(strconv.Itoa(os.Getpid())+" "+mode+"\n"), 0o644)
+	}
+	return nil
+}
+
+const (
+	modeForeground = "foreground"
+	modeDetached   = "detached"
+)
+
+// daemonIsForeground reports whether the running daemon is somebody's terminal
+// session, which must not be killed to apply a setting. A missing or stale
+// mode file reads as false: the behaviour before the file existed.
+func daemonIsForeground() bool {
+	pid, running := daemonRunning()
+	if !running {
+		return false
+	}
+	mp, err := config.ModePath()
+	if err != nil {
+		return false
+	}
+	b, err := os.ReadFile(mp)
+	if err != nil {
+		return false
+	}
+	f := strings.Fields(strings.TrimSpace(string(b)))
+	// The pid guards against a mode file left behind by an earlier daemon.
+	return len(f) == 2 && f[0] == strconv.Itoa(pid) && f[1] == modeForeground
 }
 
 func removePID() {
 	if p, err := config.PIDPath(); err == nil {
 		if b, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(b)) == strconv.Itoa(os.Getpid()) {
 			os.Remove(p)
+			if mp, err := config.ModePath(); err == nil {
+				os.Remove(mp)
+			}
 		} else if err == nil {
 			// stale or someone else's — only remove if that pid is dead
 			if pid, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && !alive(pid) {
@@ -247,8 +313,64 @@ func daemonRunning() (int, bool) {
 
 // daemonStatus is the value shown on the settings row and in doctor.
 func daemonStatus() string {
-	if pid, running := daemonRunning(); running {
-		return fmt.Sprintf("running (pid %d)", pid)
+	pid, running := daemonRunning()
+	if !running {
+		return "not running"
 	}
-	return "not running"
+	// Which one it is changes what the user should do to it, so say so.
+	if daemonIsForeground() {
+		return fmt.Sprintf("running in a terminal (pid %d)", pid)
+	}
+	return fmt.Sprintf("running in the background (pid %d)", pid)
+}
+
+// applyToRunningDaemon makes a running daemon pick up new settings or a new
+// binary. It reloads in place where it can, which is invisible and instant and
+// keeps a foreground session alive; otherwise it falls back to a stop/start.
+// Either way the user does not have to do anything.
+func applyToRunningDaemon(what string) error {
+	pid, running := daemonRunning()
+	if !running {
+		return nil
+	}
+	if err := reload(pid); err == nil {
+		fmt.Println(dim("  applying " + what + "…"))
+		return nil
+	}
+	fmt.Println(dim("  restarting FlowLite to apply " + what + "…"))
+	if err := stopBackground(); err != nil {
+		return err
+	}
+	return startBackground()
+}
+
+var reloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Make the running FlowLite pick up new settings or a new binary",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, running := daemonRunning(); !running {
+			fmt.Println("not running")
+			return nil
+		}
+		return applyToRunningDaemon("your changes")
+	},
+}
+
+// printStartedBanner is what someone sees after `flowlite`. FlowLite runs in
+// the background, so this is their one chance to be told the gestures and how
+// to stop it — the terminal they typed in is free again immediately.
+func printStartedBanner(cfg *config.Config, pid int, logPath string) {
+	model := cfg.Model
+	if m, have := catalog.Get(cfg.Model); have {
+		model = m.Label
+	}
+	key := hotkey.Label(cfg.Hotkey)
+	fmt.Printf("%s %s   %s\n", ok("✓"), bold("FlowLite "+Version+" is listening"), dim(model+" · "+key+" · pid "+strconv.Itoa(pid)))
+	fmt.Printf("  hold %s to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels\n", bold(key))
+	fmt.Println(dim("  it keeps running when you close this window —  flowlite stop  ends it"))
+	fmt.Println(dim("  settings: flowlite settings    log: " + shortenHome(logPath)))
+	if notice := updateNotice(); notice != "" {
+		fmt.Println("  " + notice)
+	}
 }

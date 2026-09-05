@@ -47,7 +47,39 @@ if (-not $ExtractedDir) { $ExtractedDir = Get-Item $TmpDir }
 
 $InstallDir = Join-Path $env:LOCALAPPDATA 'FlowLite'
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Copy-Item -Path (Join-Path $ExtractedDir.FullName '*') -Destination $InstallDir -Recurse -Force
+
+# Note whether FlowLite is already running, and stop it so the locked .exe can
+# be replaced — Windows will not let us overwrite a running binary the way
+# macOS does. It is started again below.
+$WasRunning = $false
+$OldExe = Join-Path $InstallDir 'flowlite.exe'
+if (Test-Path $OldExe) {
+    # 2>&1 on a native command turns its stderr into NativeCommandError
+    # records, which $ErrorActionPreference = 'Stop' would treat as fatal —
+    # aborting the install after the daemon has already been stopped. Keep the
+    # preference local to this block and swallow anything it throws.
+    try {
+        $ErrorActionPreference = 'Continue'
+        $stopOutput = & $OldExe stop 2>&1 | Out-String
+    } catch {
+        $stopOutput = ''
+    } finally {
+        $ErrorActionPreference = 'Stop'
+    }
+    # No output at all means nothing was running; only a real stop counts.
+    if ($stopOutput -and ($stopOutput -notmatch 'not running')) { $WasRunning = $true }
+    # Give Windows a moment to release the file lock before overwriting it.
+    for ($i = 0; $i -lt 25; $i++) {
+        if (-not (Get-Process -Name 'flowlite' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+try {
+    Copy-Item -Path (Join-Path $ExtractedDir.FullName '*') -Destination $InstallDir -Recurse -Force
+} catch {
+    throw "FlowLite: could not replace $InstallDir — is flowlite.exe still running? Close it and run this again. ($_)"
+}
 Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 
 $ExePath = Join-Path $InstallDir 'flowlite.exe'
@@ -63,7 +95,10 @@ if (($UserPath -split ';') -notcontains $InstallDir) {
 $env:Path = "$env:Path;$InstallDir"  # so it also works in *this* session
 
 Write-Host ''
-if ($env:FLOWLITE_NO_SETUP) {
+if ($WasRunning) {
+    # An upgrade, not a first install: put it back on the new binary.
+    & $ExePath start
+} elseif ($env:FLOWLITE_NO_SETUP) {
     Write-Host 'Installed. Next:  flowlite'
 } else {
     & $ExePath

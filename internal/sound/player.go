@@ -21,6 +21,13 @@ type Player struct {
 
 	workMu   sync.Mutex
 	workStop chan struct{}
+
+	// lifecycleMu serialises Reopen and Close against each other and against
+	// themselves: a wake notification racing shutdown, or two wake
+	// notifications racing each other, would otherwise both open (or free) a
+	// device and step on whichever field the other just wrote — leaking one
+	// stream or double-freeing another.
+	lifecycleMu sync.Mutex
 }
 
 type voice struct {
@@ -35,9 +42,21 @@ func NewPlayer(enabled bool) (*Player, error) {
 	if !enabled {
 		return p, nil
 	}
-	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+	ctx, dev, err := openStream(p.mix)
 	if err != nil {
 		return p, err
+	}
+	p.ctx, p.dev = ctx, dev
+	return p, nil
+}
+
+// openStream opens the default playback device with the settings the Player
+// needs. Split out of NewPlayer so Reopen can rebuild the stream from
+// scratch without duplicating the config.
+func openStream(onData malgo.DataProc) (*malgo.AllocatedContext, *malgo.Device, error) {
+	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
 	cfg.Playback.Format = malgo.FormatF32
@@ -51,20 +70,55 @@ func NewPlayer(enabled bool) (*Player, error) {
 	cfg.PeriodSizeInMilliseconds = 25
 	cfg.Alsa.NoMMap = 1
 
-	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{Data: p.mix})
+	dev, err := malgo.InitDevice(ctx.Context, cfg, malgo.DeviceCallbacks{Data: onData})
 	if err != nil {
 		_ = ctx.Uninit()
 		ctx.Free()
-		return p, err
+		return nil, nil, err
 	}
 	if err := dev.Start(); err != nil {
 		dev.Uninit()
 		_ = ctx.Uninit()
 		ctx.Free()
-		return p, err
+		return nil, nil, err
 	}
+	return ctx, dev, nil
+}
+
+// Reopen rebuilds the output stream from scratch. Call it after the system
+// wakes from sleep: closing the laptop lid suspends the CoreAudio device the
+// stream was bound to, and macOS does not hand it back in a working state on
+// its own — playback stays silent, or stutters, until the stream is torn
+// down and reopened.
+func (p *Player) Reopen() {
+	if p == nil || !p.enabled {
+		return
+	}
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
+	p.mu.Lock()
+	oldDev, oldCtx := p.dev, p.ctx
+	p.dev, p.ctx = nil, nil
+	p.active = nil
+	p.mu.Unlock()
+
+	if oldDev != nil {
+		_ = oldDev.Stop()
+		oldDev.Uninit()
+	}
+	if oldCtx != nil {
+		_ = oldCtx.Uninit()
+		oldCtx.Free()
+	}
+
+	ctx, dev, err := openStream(p.mix)
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
 	p.ctx, p.dev = ctx, dev
-	return p, nil
+	p.mu.Unlock()
 }
 
 func (p *Player) mix(out []byte, _ []byte, frames uint32) {
@@ -160,6 +214,9 @@ func (p *Player) Close() {
 		return
 	}
 	p.StopWorking()
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
 	p.mu.Lock()
 	dev, ctx := p.dev, p.ctx
 	p.dev, p.ctx = nil, nil

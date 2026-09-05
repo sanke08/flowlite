@@ -52,7 +52,7 @@ var (
 const (
 	pillLong, pillShort = 100, 30
 	barCount            = 9
-	edgeGap             = 100
+	edgeGap             = 20 // matches the macOS pill's EDGE_GAP
 	fadeIn              = 0.16
 	fadeOut             = 0.20
 	errorHold           = 0.70 // two red pulses, then fade

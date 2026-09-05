@@ -22,6 +22,7 @@ type Model struct {
 	Blurb       string
 	File        string // filename inside the HF repo and on disk
 	SizeBytes   int64  // published size; used for progress and completeness
+	SHA256      string // from HF's LFS metadata; verified against the finished download
 	EnglishOnly bool
 	Recommended bool
 }
@@ -30,28 +31,34 @@ type Model struct {
 var Catalog = []Model{
 	{
 		Key: "tiny.en", Label: "Tiny (English)", File: "ggml-tiny.en.bin", SizeBytes: 74 * mb, EnglishOnly: true,
-		Blurb: "Fastest and smallest. Fine for short, clear phrases; mangles names and jargon.",
+		SHA256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+		Blurb:  "Fastest and smallest. Fine for short, clear phrases; mangles names and jargon.",
 	},
 	{
 		Key: "base.en", Label: "Base (English)", File: "ggml-base.en.bin", SizeBytes: 141 * mb, EnglishOnly: true,
-		Blurb: "Still near-instant and clearly better than Tiny.",
+		SHA256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+		Blurb:  "Still near-instant and clearly better than Tiny.",
 	},
 	{
 		Key: "small.en", Label: "Small (English)", File: "ggml-small.en.bin", SizeBytes: 465 * mb, EnglishOnly: true,
-		Blurb: "Strong everyday English, comfortably under a second.",
+		SHA256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+		Blurb:  "Strong everyday English, comfortably under a second.",
 	},
 	{
 		Key: "large-v3-turbo-q5", Label: "Large v3 Turbo (compressed)", File: "ggml-large-v3-turbo-q5_0.bin",
 		SizeBytes: 547 * mb, Recommended: true,
-		Blurb: "Near-best accuracy across 99 languages, handles accents well, a third the size of the full build. ~1.5 s per dictation.",
+		SHA256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+		Blurb:  "Near-best accuracy across 99 languages, handles accents well, a third the size of the full build. ~1.5 s per dictation.",
 	},
 	{
 		Key: "large-v3-turbo", Label: "Large v3 Turbo (full)", File: "ggml-large-v3-turbo.bin", SizeBytes: 1549 * mb,
-		Blurb: "Uncompressed Turbo. Marginally more faithful, three times the disk.",
+		SHA256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+		Blurb:  "Uncompressed Turbo. Marginally more faithful, three times the disk.",
 	},
 	{
 		Key: "large-v3", Label: "Large v3", File: "ggml-large-v3.bin", SizeBytes: 2952 * mb,
-		Blurb: "Most accurate. Several times slower than Turbo for a small gain.",
+		SHA256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+		Blurb:  "Most accurate. Several times slower than Turbo for a small gain.",
 	},
 }
 

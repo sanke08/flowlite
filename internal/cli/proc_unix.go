@@ -23,3 +23,23 @@ func terminate(pid int) error {
 	}
 	return p.Signal(syscall.SIGTERM)
 }
+
+// reload asks a running daemon to reload itself in place. It answers SIGHUP by
+// replacing its own process image, so the change applies with nothing for the
+// user to stop, start or think about.
+func reload(pid int) error {
+	return syscall.Kill(pid, syscall.SIGHUP)
+}
+
+// reexecSelf replaces this process with a fresh copy of the binary on disk.
+// Same pid, same terminal, same stdin and stdout, same responsible app for the
+// Accessibility grant — so a settings change or an update applies to a
+// FlowLite running in someone's terminal tab without taking that tab away or
+// downgrading it to a detached process that has to ask for permission again.
+func reexecSelf() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(exe, os.Args, os.Environ())
+}

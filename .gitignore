@@ -14,5 +14,10 @@ Thumbs.db
 # Old Python-era installers left on disk; never commit binaries here
 /app/
 
+# Python bytecode from the retired PySide6 app (the source lives at tag
+# python-v0.1.0). Compiled files were committed by accident once already.
+__pycache__/
+*.pyc
+
 # whisper.cpp source for the self-contained (static) build
 /third_party/whisper.cpp/

@@ -16,7 +16,7 @@ and no audio is ever uploaded anywhere.
 > A Windows build exists and has a one-line installer too, but has not been
 > tested on real hardware yet — see [Windows](#windows-experimental).
 
-There are only four commands to know:
+Four commands cover everyday use:
 
 | command | what it does |
 | --- | --- |
@@ -24,6 +24,11 @@ There are only four commands to know:
 | `flowlite settings` | everything you can change, in one menu |
 | `flowlite doctor` | check what FlowLite needs and how to fix what is missing |
 | `flowlite update` | get the latest version |
+
+Three more exist when you need them: `flowlite start` and `flowlite stop` run it
+detached from the terminal, and `flowlite uninstall` removes it. (`flowlite
+reload` is there too, but you should never need it — settings and updates apply
+themselves.)
 
 ---
 
@@ -148,7 +153,7 @@ You'll see a banner like
 
 ```
 FlowLite v0.4.0 is listening.   Large v3 Turbo (compressed) · Right Option · Metal
-  hold Right Option to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels · Ctrl+C quits
+  hold Right Option to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels
   settings: flowlite settings (in another tab)
 ```
 
@@ -182,15 +187,24 @@ transcripts in the terminal instead.
 
 ## Everyday use
 
-**`flowlite` → banner → dictate → Ctrl+C.** That is the whole loop. Keep it
-running in a Terminal tab (or under tmux): you get a live one-line log of every
-transcript, and Ctrl+C stops it. If you run `flowlite` while one is already
-listening, it tells you so and does nothing — two listeners would paste twice.
+**`flowlite` once, then dictate.** That is the whole loop.
 
-Prefer no tab at all? `flowlite settings → Background daemon → Start in
-background` runs it detached, logging to a file; the same row stops or
-restarts it. The foreground is still recommended: macOS occasionally drops the
-keyboard permission of a detached process.
+FlowLite runs in the background. `flowlite` starts it and hands your terminal
+straight back — you can close the window, and it keeps listening. Closing the
+terminal or pressing Ctrl+C in it does not stop it, because by then dictation
+is part of how you type and losing it by accident would be worse than useless.
+
+```bash
+flowlite          # start listening (does nothing if it already is)
+flowlite stop     # the one way to stop it
+```
+
+Running `flowlite` while it is already listening tells you so and does nothing
+— two listeners would paste twice. Every transcript is logged to
+`~/Library/Application Support/FlowLite/flowlite.log`; `tail -f` it if you want
+to watch. `flowlite --no-paste` is the exception that stays in your terminal:
+it prints transcripts instead of pasting them, for when you want to see what it
+heard without it typing anywhere.
 
 **Nothing is ever lost.** Every transcript — including ones that had nowhere
 to paste — is kept. `flowlite settings → Recent transcripts` lists the last
@@ -216,8 +230,10 @@ flowlite settings
 ```
 
 One menu; every row shows its current value. Pick a row, change it, it is saved
-at once. Rows marked ⟳ take effect the next time you start `flowlite` (the
-menu reminds you once, on the way out, if one is running).
+at once — and if FlowLite is running, it applies the change to itself on the
+way out. That works whether it is running in the background or in a terminal
+tab you are sitting in: it reloads in place, keeping its pid, its tab and its
+keyboard permission. There is nothing to restart.
 
 | row | what it is |
 | --- | --- |
@@ -263,8 +279,11 @@ flowlite update --check    # only say whether there is one
 
 `update` downloads the release for this Mac from GitHub, checks that the file
 is complete and actually runs, then replaces the program in place. Your
-settings and model are untouched. If `flowlite` is running, it keeps the old
-version until you restart it (Ctrl+C, then `flowlite`).
+settings and model are untouched, and **a running FlowLite moves to the new
+version by itself** — including one you are running in a terminal, which keeps
+its tab, its pid and its keyboard permission. You do not have to stop or start
+anything. The same is true of the one-line installer when you use it to
+upgrade, and of every change you make in `flowlite settings`.
 
 FlowLite also looks for a newer release on its own, at most once a day, and
 mentions it in the listening banner and in `flowlite doctor`. That check is
@@ -343,9 +362,13 @@ installed. Then remove Terminal from Accessibility if you like.
 
 ## Windows (experimental)
 
-The Windows version — keyboard hook, paste, and the pill — is written and
-compiles, but **has never been run on a Windows machine**. If you try it, you
-are the first. Open **PowerShell** and paste this one line:
+Windows is a **preview**. The keyboard hook, the paste and the pill are all
+written, and every release cross-compiles and links them on CI — but they have
+not yet been exercised on real Windows hardware, so treat this as a build to
+try and report on rather than one to rely on. Bugs and successes are both
+useful: please open an issue either way.
+
+Open **PowerShell** and paste this one line:
 
 ```powershell
 irm https://raw.githubusercontent.com/sanke08/flowlite/main/install.ps1 | iex
@@ -376,6 +399,39 @@ Homebrew's `whisper-cpp` (`brew install whisper-cpp`) instead of compiling it.
 `make test` runs the unit tests; the whisper test additionally loads whatever
 model is installed and asserts Metal was used.
 
+#### Testing your changes locally
+
+`make install` and the curl installer write the **same file** — so a local
+build replaces the downloaded one in place, and nothing needs uninstalling
+first. (They agree whenever `/opt/homebrew/bin` or `/usr/local/bin` is
+writable, which is the normal case. If neither is, the installer falls back to
+`~/.local/bin` while `make` still uses `/usr/local`, leaving two copies for
+`PATH` to choose between — pass `PREFIX=$HOME/.local` to `make` to match.)
+
+```bash
+make dev       # build, install, restart — this is the daily loop
+```
+
+`make dev` takes seconds because it links Homebrew's `whisper-cpp` rather than
+compiling it. It stops whatever is listening, installs the new binary and
+starts it again in the background, then prints the `tail -f` command for the
+log so you can watch what it does.
+
+One thing to expect: every rebuild changes the binary, and macOS ties the
+Accessibility grant to the binary it was given to. So a fresh build can find
+itself without keyboard access and say so on startup — `flowlite doctor` will
+tell you, and you re-allow it in **System Settings → Privacy & Security →
+Accessibility**.
+
+```bash
+make run       # full static release build, installed and started in background
+make restart   # stop the daemon and start it again, no rebuild
+```
+
+Use `make run` once before tagging, to confirm the real release binary behaves
+the same as your dev build. Its first run is slow — it clones and compiles
+whisper.cpp — and cached after that.
+
 Three hidden root flags exist for plumbing and are not part of the user
 interface: `--daemon` (what "Start in background" spawns), `--pill-preview
 <edge>` and `--play-cues` (what the settings menu spawns, because the pill
@@ -401,25 +457,61 @@ library embedded, targets macOS 13+, and depends only on system frameworks.
 
 ### Versioning and releases
 
-Semantic versioning. The `VERSION` file is the single source of truth, and
-**releases are automatic**: `.github/workflows/release.yml` runs on every push
-to `main`; if `VERSION` names a version that has no git tag yet, GitHub's own
-Apple Silicon runner runs the tests, builds the self-contained macOS binary and
-the Windows zip, writes `SHA256SUMS`, creates the tag and the Release. The curl
-installer and `flowlite update` pick it up within minutes. A push that does not
-change `VERSION` releases nothing.
+Semantic versioning, and **releases are automatic**.
+`.github/workflows/release.yml` runs on every push to `main` that touches code.
+GitHub's own Apple Silicon runner runs the tests, builds the self-contained
+macOS binary and the Windows zip, writes `SHA256SUMS`, creates the tag and the
+Release. The curl installer and `flowlite update` pick it up within minutes.
 
-To release:
+Everything below follows from one rule: **the version is decided by whether
+`VERSION` already has a git tag.**
+
+| `VERSION` says | Meaning | What ships |
+| --- | --- | --- |
+| a version that is already tagged | an ordinary code push | the next patch — 0.4.8 → 0.4.9 |
+| a version with no tag yet | only a human writes this | exactly that version |
+
+So a patch release needs no thought, and a minor or major release is always a
+deliberate act. Nothing can reach 1.0.0 by accident.
+
+#### A normal release — patch
+
+**Do not touch `VERSION`.** Just push code:
 
 ```bash
-echo 0.5.0 > VERSION          # 1. decide the version (patch / minor / major)
-$EDITOR CHANGELOG.md          # 2. say what changed
-git add -A && git commit -m "v0.5.0" && git push    # 3. that's it
+git add -A && git commit -m "fix: pill not rendering after wake" && git push
 ```
 
-Watch it on the repository's **Actions** tab. `make publish` does the same from
-your machine if you ever need to release by hand (it insists HEAD is tagged
-`v<VERSION>` and the tree is clean). Untagged local builds report
+The runner tags `v0.4.9`, publishes the Release, and commits the new `VERSION`
+back to `main` for you.
+
+#### A major or minor release
+
+**Edit `VERSION` first.** That is the one deliberate step:
+
+```bash
+echo 1.0.0 > VERSION                                  # or 0.5.0 for a minor
+$EDITOR CHANGELOG.md                                  # what changed
+$EDITOR release-notes.md                              # what the Release page shows
+git add -A && git commit -m "v1.0.0" && git push
+```
+
+A `VERSION` that is not `X.Y.Z`, or that is not newer than the latest tag,
+**fails the build** rather than publishing something wrong.
+
+#### Three things worth knowing
+
+- **Pull before you start work again.** Every patch release pushes a `VERSION`
+  commit to `main`. Without `git pull` your next push conflicts.
+- **Doc-only pushes release nothing.** `**.md` and `.github/**` are ignored, so
+  a README fix on its own ships no binary. That is usually what you want — but
+  it is why "nothing happened" is sometimes the correct outcome.
+- **`release-notes.md` is the text on every Release page.** It is not generated
+  from the CHANGELOG, so edit it *before* you push a version people will read.
+
+Watch a run on the repository's **Actions** tab. `make publish` does the same
+from your machine if you ever need to release by hand (it insists HEAD is
+tagged `v<VERSION>` and the tree is clean). Untagged local builds report
 `v0.5.0-dev+<sha>` so they can never be mistaken for the release.
 
 ### Windows build

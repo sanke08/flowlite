@@ -21,6 +21,8 @@ var (
 	procGlobalAlloc    = kernel32.NewProc("GlobalAlloc")
 	procGlobalLock     = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock   = kernel32.NewProc("GlobalUnlock")
+	procGlobalSize     = kernel32.NewProc("GlobalSize")
+	procClipSeqNumber  = user32.NewProc("GetClipboardSequenceNumber")
 )
 
 const (
@@ -60,7 +62,16 @@ func clipboardGet() (string, bool) {
 			return nil
 		}
 		defer procGlobalUnlock.Call(h)
-		out = syscall.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(p)), 1<<20))
+		// The clipboard owner's allocation can be any size — a hardcoded
+		// slice length here would read past a smaller one into whatever
+		// memory follows it, occasionally an unmapped page. GlobalSize is
+		// the actual bound to build the slice against.
+		size, _, _ := procGlobalSize.Call(h)
+		n := int(size) / 2 // CF_UNICODETEXT is UTF-16: 2 bytes per unit
+		if n == 0 {
+			return nil
+		}
+		out = syscall.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(p)), n))
 		ok = true
 		return nil
 	})
@@ -121,4 +132,13 @@ func pasteKeystroke() error {
 		return errors.Join(errors.New("SendInput did not deliver the paste"), err)
 	}
 	return nil
+}
+
+// clipboardSerial is Windows' clipboard sequence number: it advances on every
+// change, so comparing it before and after tells us whether what we put on the
+// clipboard is still there. Zero means the call is unavailable, which compares
+// equal to itself and so falls back to restoring unconditionally.
+func clipboardSerial() uint64 {
+	n, _, _ := procClipSeqNumber.Call()
+	return uint64(n)
 }

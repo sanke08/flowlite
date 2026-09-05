@@ -3,7 +3,122 @@
 All notable changes to FlowLite. Versions follow [Semantic Versioning](https://semver.org):
 MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
-## [0.4.0] — unreleased
+## [Unreleased]
+
+### Fixed
+- **Quitting during a transcription could crash.** `Model.Close` called
+  `whisper_free` without waiting for `whisper_full`, so Ctrl+C mid-dictation —
+  or any restart triggered by `settings` or `update` — was a use-after-free.
+- **A denied microphone looked like a working app.** Recording without the
+  permission does not fail; it returns silence. Nothing checked for it, so
+  every dictation ended in "Nothing heard" while `doctor` reported all green.
+  The permission is now requested at startup, checked by `doctor` before it
+  lists devices, and reported as "Microphone blocked" rather than blamed on
+  the user.
+- **A slow app could receive the previous clipboard instead of the
+  transcript.** The old contents were restored on a fixed timer, whether or
+  not the paste had landed. The restore now waits longer and only happens if
+  the clipboard is still the one we wrote — so a Cmd+C during the wait is no
+  longer overwritten either.
+- **A paste that silently did nothing reported success.** Neither the
+  clipboard write nor the Cmd+V keystroke checked its result, so revoking
+  Accessibility mid-session produced the success chime, a "Pasted" history
+  entry, and no text anywhere. Both now report failure.
+- **Upgrading left the old version running.** Neither installer stopped the
+  daemon first, so on macOS the new binary was installed under a still-running
+  old one, and on Windows the copy failed outright against the locked `.exe`.
+  Both now stop it, replace it, and start it again if it had been running.
+- **`uninstall` recreated the directory it had just deleted** by racing the
+  daemon it killed; it now waits for the process to exit.
+- **Settings, updates and upgrades now apply themselves, without stopping
+  anything.** A running FlowLite reloads in place: it replaces its own process
+  image, keeping the same pid, the same terminal and the same Accessibility
+  grant. Previously the only way to apply a change was to stop the daemon and
+  respawn it detached, which took over the terminal tab someone was working in
+  and moved it to the mode that can lose that grant. There is nothing to
+  restart by hand in either mode now.
+
+### Added
+- **FlowLite always runs in the background now.** `flowlite` starts it and
+  gives the terminal straight back; closing that window, or pressing Ctrl+C in
+  it, no longer stops dictation. `flowlite stop` is the one way to stop it.
+  (`flowlite --no-paste` still runs in the terminal, because printing
+  transcripts instead of pasting them needs somewhere to print.)
+- `flowlite reload` makes a running FlowLite pick up new settings or a newly
+  installed binary, in place.
+
+### Changed
+- `flowlite doctor` and the settings menu now say whether FlowLite is running
+  in a terminal or in the background, because what you would do to it differs.
+- Releases: editing `VERSION` by hand now releases that exact version, which is
+  the only way to reach a new minor or major. Leaving it alone still bumps the
+  patch automatically.
+
+## [0.4.9] — 2026-09-05
+
+### Fixed
+- **The pill could stop appearing after the Mac woke from sleep.** The overlay
+  window was built once per process and only ordered in and out after that, so
+  a stale Space assignment left it drawing at full opacity on a Space nobody
+  was looking at — recording, transcription and pasting all worked, and only
+  the pill was missing. It now re-asserts its window traits on every show,
+  checks it landed on the active Space and rebuilds the window if it did not,
+  and drops the window on wake and on display changes.
+
+### Changed
+- The pill sits flush against the screen edge on the left and right, and
+  clears the camera notch and menu bar at the top.
+- `make dev`, `make run` and `make restart` build, install and restart FlowLite
+  locally; `make dev` runs in the foreground so the Accessibility grant follows
+  the terminal and survives rebuilds.
+
+## [0.4.8] — 2026-09-04
+
+### Added
+- `install.ps1`, a one-line PowerShell installer for Windows.
+
+## [0.4.7] — 2026-09-04
+
+### Fixed
+- Audio underruns during high CPU load: the capture period is now 25 ms.
+
+## [0.4.6] — 2026-09-04
+
+### Changed
+- The Working cue is driven by state rather than played manually, and master
+  peak volume is higher.
+
+## [0.4.5] — 2026-09-04
+
+### Added
+- The background daemon restarts itself after a binary update.
+
+## [0.4.4] — 2026-09-04
+
+### Changed
+- Darker, weightier synth cues, and a precise mechanical tick while working.
+
+## [0.4.3] — 2026-09-04
+
+### Added
+- The background daemon restarts automatically when settings change.
+
+## [0.4.2] — 2026-09-04
+
+### Added
+- `flowlite start` and `flowlite stop`.
+- The command list is shown after first-time setup.
+
+## [0.4.1] — 2026-09-04
+
+### Added
+- `flowlite uninstall` as a top-level command.
+- Automatic patch-version bump and release on every push to `main`.
+
+### Changed
+- The pill sits closer to the screen edge.
+
+## [0.4.0] — 2026-09-04
 
 ### Removed
 - **Command surface reduced to four verbs: `flowlite`, `flowlite settings`,
@@ -31,7 +146,7 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   warm saturation. Start/Stop rise and fall over a soft sub body, Done chimes,
   Working is a barely-there wood tock, Cancel sighs downward, Error is a dull
   tritone descent. `flowlite settings → Sounds → Play the cues` plays them.
-- **Pill redesign:** pure black capsule with a fainter border, 100 px from the
+- **Pill redesign:** pure black capsule with a fainter border, set in from the
   physical screen edge (over the Dock at the bottom). No text or glyphs at all:
   a waveform while recording, a shimmer sweeping across settled bars while
   processing (the spinner is gone), two red pulses on failure; success and

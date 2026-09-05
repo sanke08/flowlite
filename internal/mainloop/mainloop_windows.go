@@ -102,3 +102,6 @@ func DispatchSync(fn func()) {
 
 // ThreadID is the loop thread, for callers that need to install hooks on it.
 func ThreadID() uint32 { return mainTID }
+
+// OnWake has no sleep/wake signal wired up here yet; fn is never called.
+func OnWake(fn func()) {}
