@@ -132,7 +132,7 @@ func (r *Recorder) onData(_ []byte, in []byte, frames uint32) {
 		r.buf = append(r.buf, samples...)
 	}
 	// Smooth the meter a little so the pill doesn't strobe.
-	r.level = 0.6*r.level + 0.4*math.Min(rms*4, 1)
+	r.level = 0.5*r.level + 0.5*math.Min(rms*12, 1)
 	r.mu.Unlock()
 }
 

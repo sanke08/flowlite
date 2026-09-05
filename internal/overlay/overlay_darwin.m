@@ -96,7 +96,7 @@ static void approach(double *v, double want, double dt, double tau) { *v += (wan
     for (int i = 0; i < BARS; i++) {
         double env = 1.0 - 0.55 * pow(fabs(i - center) / center, 1.6);   // centre tallest
         double wob = 0.72 + 0.28 * sin(t * (6.5 + i * 0.9) + i * 1.7);    // breathes even when steady
-        double desired = clamp01(level * 1.9) * env * wob;
+        double desired = clamp01(level * 2.6) * env * wob;
         bars[i] += (desired - bars[i]) * 0.35;
     }
 
