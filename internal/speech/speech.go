@@ -11,6 +11,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -134,4 +135,36 @@ func Finalise(segs []string) string {
 		return ""
 	}
 	return text
+}
+
+// Silence tracks how long a live recording has gone without speech, using
+// the same SpeechRMS threshold HasSpeech applies after the fact, so "silence"
+// means one thing everywhere. Feed it the recorder's raw RMS on every tick.
+type Silence struct {
+	lastSpeech time.Time
+}
+
+// Reset marks now as the moment speech was last heard (or recording began).
+func (s *Silence) Reset(now time.Time) { s.lastSpeech = now }
+
+// Observe records one live RMS reading; a value above SpeechRMS counts as
+// speech and restarts the trailing window.
+func (s *Silence) Observe(rms float64, now time.Time) {
+	if rms > SpeechRMS {
+		s.lastSpeech = now
+	}
+}
+
+// Quiet is how long it has been since speech was last observed.
+func (s *Silence) Quiet(now time.Time) time.Duration {
+	if s.lastSpeech.IsZero() {
+		return 0
+	}
+	return now.Sub(s.lastSpeech)
+}
+
+// ShouldStop reports whether the trailing silence has reached limit. A limit
+// of zero or less disables auto-stop.
+func (s *Silence) ShouldStop(now time.Time, limit time.Duration) bool {
+	return limit > 0 && s.Quiet(now) >= limit
 }

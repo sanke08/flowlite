@@ -3,6 +3,7 @@
 package overlay
 
 import (
+	"log"
 	"math"
 	"sync"
 	"syscall"
@@ -10,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/sanke08/flowlite/internal/mainloop"
+	"github.com/sanke08/flowlite/internal/win32"
 )
 
 // A small layered, top-most, non-activating black capsule painted with GDI.
@@ -26,10 +28,7 @@ import (
 var (
 	user32 = syscall.NewLazyDLL("user32.dll")
 	gdi32  = syscall.NewLazyDLL("gdi32.dll")
-	kernel = syscall.NewLazyDLL("kernel32.dll")
 
-	pRegisterClassExW      = user32.NewProc("RegisterClassExW")
-	pCreateWindowExW       = user32.NewProc("CreateWindowExW")
 	pDefWindowProcW        = user32.NewProc("DefWindowProcW")
 	pShowWindow            = user32.NewProc("ShowWindow")
 	pSetWindowPos          = user32.NewProc("SetWindowPos")
@@ -43,7 +42,6 @@ var (
 	pSetWindowRgn          = user32.NewProc("SetWindowRgn")
 	pFillRect              = user32.NewProc("FillRect")
 	pDrawTextW             = user32.NewProc("DrawTextW")
-	pGetModuleHandleW      = kernel.NewProc("GetModuleHandleW")
 
 	pCreateSolidBrush      = gdi32.NewProc("CreateSolidBrush")
 	pCreateRoundRectRgn    = gdi32.NewProc("CreateRoundRectRgn")
@@ -127,13 +125,6 @@ type paintStruct struct {
 	restore     int32
 	incUpdate   int32
 	rgbReserved [32]byte
-}
-type wndClassEx struct {
-	size, style                   uint32
-	wndProc, clsExtra, wndExtra   uintptr
-	instance, icon, cursor, brush uintptr
-	menuName, className           *uint16
-	iconSm                        uintptr
 }
 
 var (
@@ -392,13 +383,19 @@ func ensureWindow() {
 	if hwnd != 0 {
 		return
 	}
-	inst, _, _ := pGetModuleHandleW.Call(0)
-	cls, _ := syscall.UTF16PtrFromString("FlowLitePill")
-	wc := wndClassEx{size: uint32(unsafe.Sizeof(wndClassEx{})), wndProc: wndProcCB, instance: inst, className: cls}
-	pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
-	hwnd, _, _ = pCreateWindowExW.Call(
+	cls, err := win32.RegisterClass("FlowLitePill", wndProcCB)
+	if err != nil {
+		// No pill this time; hwnd stays 0 and the next Show retries.
+		log.Printf("overlay: %v", err)
+		return
+	}
+	hwnd, err = win32.CreateHiddenWindow(
 		wsExLayered|wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
-		uintptr(unsafe.Pointer(cls)), 0, wsPopup, 0, 0, pillLong, pillShort, 0, 0, inst, 0)
+		cls, wsPopup, pillLong, pillShort)
+	if err != nil {
+		log.Printf("overlay: %v", err)
+		return
+	}
 	pSetLayeredWindowAttrs.Call(hwnd, 0, 0, lwaAlpha)
 }
 
@@ -521,6 +518,11 @@ func reposition() {
 func Show(s State, textArg string) {
 	mainloop.Dispatch(func() {
 		ensureWindow()
+		if hwnd == 0 {
+			// No window this time (see ensureWindow). Leave state untouched
+			// so the next Show still counts as fresh and retries creation.
+			return
+		}
 		mu.Lock()
 		fresh := state == Hidden || !hideAt.IsZero()
 		if fresh && terminal(s) {
@@ -615,9 +617,14 @@ func Hide() {
 // Snapshot is not implemented on Windows.
 func Snapshot(path string) error { return nil }
 
+// SnapshotWindow is not implemented on Windows.
+func SnapshotWindow(path string) error { return nil }
+
 // The history panel is not implemented on Windows: hotkey.ModifierHeld
 // already stubs false on non-darwin, so the ShowHistory gesture never fires
 // here, but overlay.go's shared API still needs these to satisfy the build.
 func showHistory(entries []HistoryEntry, onPick func(int), onClose func()) {}
 func hideHistory()                                                         {}
 func isHistoryOpen() bool                                                  { return false }
+func setHistoryQuery(query string)                                         {}
+func historyHasKey() bool                                                  { return false }

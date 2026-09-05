@@ -173,7 +173,14 @@ static void approach(double *v, double want, double dt, double tau) { *v += (wan
     // (capped at 1) plus velocity stretch. Across it: the pop minus the
     // squash that the >1 overshoot turns into, minus the same stretch.
     // Neither axis ever exceeds 1, so nothing is clipped by the window.
-    {
+    //
+    // Skipped while the history panel is open: the pop spring is only
+    // integrated by tick(), which the history morph stops, so popPos is
+    // frozen at whatever the last pill appearance left it — POP_FROM (0.8)
+    // after a fade-out. Applying that here would draw the backdrop at 80%
+    // of the panel, leaving the table's edges (time column, line ends) over
+    // bare desktop and the whole thing reading as translucent.
+    if (!historyOpen) {
         double over    = fmax(popPos - 1.0, 0.0);
         double base    = fmin(popPos, 1.0);
         double stretch = fmin(fabs(slideVel) * STRETCH_GAIN, STRETCH_MAX);
@@ -345,10 +352,27 @@ static void installObservers(void) {
                 usingBlock:refresh];
 }
 
+// historyKeyAllowed is the only thing that ever lets the panel become key:
+// YES from the moment the history panel opens until the instant a row is
+// picked or the panel starts closing (see historyResignKey). Outside that
+// window FLPanel refuses key status exactly like a plain borderless NSPanel.
+static BOOL historyKeyAllowed = NO;
+
+// FLPanel exists solely so the history panel's search field can take typing.
+// A borderless window says NO to canBecomeKeyWindow by default; combined
+// with NSWindowStyleMaskNonactivatingPanel (set in ensurePanel), saying YES
+// lets the window receive keyboard input WITHOUT activating FlowLite — the
+// user's app stays frontmost, which is what makes the paste land there.
+@interface FLPanel : NSPanel
+@end
+@implementation FLPanel
+- (BOOL)canBecomeKeyWindow { return historyKeyAllowed; }
+@end
+
 static void ensurePanel(void) {
     if (panel) return;
     NSRect frame = NSMakeRect(0, 0, PILL_LONG, PILL_SHORT);
-    panel = [[NSPanel alloc] initWithContentRect:frame
+    panel = [[FLPanel alloc] initWithContentRect:frame
                                        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
                                          backing:NSBackingStoreBuffered
                                            defer:NO];
@@ -655,26 +679,72 @@ bool flowlite_overlay_snapshot(const char *path) {
 //      the hand-rolled tick() timer — a real interactive AppKit control
 //      needs the standard event/animation machinery, not a manual one.
 
-static NSArray       *historyRows   = nil;   // array of {index, time, preview}
-static NSScrollView  *historyScroll = nil;
-static NSTableView   *historyTable  = nil;
-static id             historyDS     = nil;   // FLHistoryDataSource instance
+static NSArray       *historyAllRows = nil;  // every {index, time, preview} the Go side passed
+static NSArray       *historyRows    = nil;  // the VISIBLE subset after the search filter, same order
+static NSScrollView  *historyScroll  = nil;
+static NSTableView   *historyTable   = nil;
+static NSTextField   *historySearch  = nil;  // the single-line filter field above the table
+static NSArray<NSLayoutConstraint *> *historyConstraints = nil; // active only while the panel is open
+static NSView        *historySep     = nil;  // hairline between the field and the table
+static NSTextField   *historyEmpty   = nil;  // "No matches", shown only when the filter hides every row
+static id             historyDS      = nil;  // FLHistoryDataSource instance
 static id             historyEscMonitor   = nil;
 static id             historyClickMonitor = nil;
 
-// Forward declaration: FLHistoryDataSource and installHistoryMonitors below
-// both close the panel by calling this, ahead of its own definition further
-// down this section (mirrors the existing forward declaration of
-// flowlite_overlay_hide near terminal()/flowlite_overlay_show above).
-void flowlite_overlay_hide_history(void);
+#define HIST_SEARCH_H   22.0   // height of the search field
+#define HIST_SEARCH_GAP  6.0   // gap field -> separator, and separator -> table
 
-@interface FLHistoryDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+// Forward declarations: FLHistoryDataSource and installHistoryMonitors below
+// both close the panel by calling flowlite_overlay_hide_history, ahead of its
+// own definition further down this section (mirrors the existing forward
+// declaration of flowlite_overlay_hide near terminal()/flowlite_overlay_show
+// above). The other three are the search field's shared key handling.
+void flowlite_overlay_hide_history(void);
+static void historyApplyFilter(void);
+static void historyPickRow(NSInteger row);
+static void historyMoveSelection(NSInteger delta);
+
+@interface FLHistoryDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate>
 @end
 
 @implementation FLHistoryDataSource
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tv {
     (void)tv;
     return (NSInteger)historyRows.count;
+}
+// ---- search field delegate ----
+// Live filter: every edit re-derives the visible rows from the full list.
+- (void)controlTextDidChange:(NSNotification *)note {
+    (void)note;
+    historyApplyFilter();
+}
+// The field keeps first responder for the whole life of the panel — typing
+// always lands in it — and the navigation keys are intercepted here, at the
+// field editor, instead of being let through to the text view's own
+// (useless, single-line) handling of them.
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
+    (void)control; (void)tv;
+    if (sel == @selector(moveUp:))   { historyMoveSelection(-1); return YES; }
+    if (sel == @selector(moveDown:)) { historyMoveSelection(+1); return YES; }
+    if (sel == @selector(insertNewline:)) {
+        // Enter acts on the highlighted row if the user arrowed to one,
+        // otherwise on the first visible row — the same code path a click
+        // takes (historyPickRow), so it also closes the panel.
+        NSInteger row = historyTable.selectedRow;
+        historyPickRow(row >= 0 ? row : 0);
+        return YES;
+    }
+    if (sel == @selector(cancelOperation:)) {
+        // Escape: clear a non-empty query first; a second press closes.
+        if (historySearch.stringValue.length > 0) {
+            historySearch.stringValue = @"";
+            historyApplyFilter();
+        } else {
+            flowlite_overlay_hide_history();
+        }
+        return YES;
+    }
+    return NO;
 }
 // Each row is a plain NSView "cell" holding two subviews, pinned to the
 // cell's edges with Auto Layout (not a hand-set frame): the table itself sets
@@ -727,6 +797,7 @@ void flowlite_overlay_hide_history(void);
     tf.cell.wraps = YES;
     tf.lineBreakMode = NSLineBreakByWordWrapping;
     tf.maximumNumberOfLines = HIST_ROW_MAXLINES;
+    tf.cell.truncatesLastVisibleLine = YES; // end the 3-line cap with an ellipsis, not a bare cut
     // The preview no longer shares its line with the time label, so its wrap
     // width is the column width minus the time label's fixed width and gap —
     // not the full column width as before.
@@ -754,16 +825,89 @@ void flowlite_overlay_hide_history(void);
     ]];
     return cell;
 }
-- (void)tableViewSelectionDidChange:(NSNotification *)note {
-    (void)note;
-    NSInteger row = historyTable.selectedRow;
+// A click on a row pastes it. This is the table's target/action (set in
+// ensureHistoryUI), NOT tableViewSelectionDidChange: Up/Down from the search
+// field now move the selection as a highlight, and selection-triggered
+// picking would paste on the first arrow press.
+- (void)rowClicked:(id)sender {
+    (void)sender;
+    historyPickRow(historyTable.clickedRow);
+}
+@end
+
+// historyResignKey drops the panel's keyboard focus synchronously, BEFORE the
+// Go side is told about a pick. inject.Paste posts Cmd+V through
+// CGEventPost(kCGHIDEventTap), which the window server routes to whichever
+// process currently holds key focus — while the search field has it, that is
+// FlowLite, and the transcript would be pasted into our own field instead of
+// the user's app. Ordering the (non-activating) panel out is what hands key
+// focus back to the previously-key window of the active app; it is ordered
+// straight back in, un-keyed, so the shrink animation still has something to
+// draw. Both calls land in the same window-server transaction, so nothing
+// visibly blinks. After this canBecomeKeyWindow says NO again.
+static void historyResignKey(void) {
+    historyKeyAllowed = NO;
+    if (!panel) return;
+    [panel makeFirstResponder:nil];
+    if ([panel isKeyWindow] || [panel isVisible]) {
+        [panel orderOut:nil];
+        [panel orderFrontRegardless];
+    }
+}
+
+// historyPickRow maps a VISIBLE row back to the ORIGINAL index the Go side
+// passed (the "index" each row carries — never the table row number, which
+// changes with the filter), then dismisses the panel. Key focus is given up
+// first (see historyResignKey) so the paste the Go callback triggers lands in
+// the user's app, however quickly its goroutine gets to the keystroke.
+static void historyPickRow(NSInteger row) {
     if (row < 0 || (NSUInteger)row >= historyRows.count) return;
     NSDictionary *r = historyRows[(NSUInteger)row];
     int idx = [r[@"index"] intValue];
+    historyResignKey();
     flowliteHistoryPick(idx);
     flowlite_overlay_hide_history(); // picking a row both acts on it and dismisses the panel
 }
-@end
+
+// historyMoveSelection moves the highlight by delta (clamped) and scrolls it
+// into view; the row is only acted on by Enter or a click.
+static void historyMoveSelection(NSInteger delta) {
+    NSInteger n = (NSInteger)historyRows.count;
+    if (n == 0) return;
+    NSInteger cur = historyTable.selectedRow;
+    NSInteger next = cur < 0 ? (delta > 0 ? 0 : n - 1) : cur + delta;
+    if (next < 0) next = 0;
+    if (next >= n) next = n - 1;
+    [historyTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)next] byExtendingSelection:NO];
+    [historyTable scrollRowToVisible:next];
+}
+
+// historyApplyFilter derives historyRows from historyAllRows: a
+// case-insensitive substring match on the preview text, original order kept,
+// everything when the query is empty. It swaps the table for the "No matches"
+// line when nothing survives and drops the selection, which pointed at rows
+// of the previous filter.
+static void historyApplyFilter(void) {
+    NSString *q = [historySearch.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (q.length == 0) {
+        historyRows = historyAllRows ?: @[];
+    } else {
+        NSMutableArray *keep = [NSMutableArray array];
+        for (NSDictionary *r in historyAllRows) {
+            NSString *p = r[@"preview"];
+            if ([p isKindOfClass:[NSString class]] &&
+                [p rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [keep addObject:r];
+            }
+        }
+        historyRows = keep;
+    }
+    [historyTable deselectAll:nil];
+    [historyTable reloadData];
+    BOOL none = historyRows.count == 0 && historyAllRows.count > 0;
+    historyEmpty.hidden = !none;
+    historyTable.hidden = none;
+}
 
 // ensureHistoryUI lazily builds the scroll view/table once and keeps it as a
 // subview of the pill's own view — it persists across panel rebuilds the
@@ -782,6 +926,13 @@ static void ensureHistoryUI(void) {
     // NSScrollView: it makes NSScrollView's internal tiling resize the table
     // to track the clip view's width on every layout pass.
     historyTable.autoresizingMask = NSViewWidthSizable;
+    // macOS 11+ defaults to the "inset" table style, which pads every cell
+    // 16pt on each side and makes the table 32pt WIDER than its clip view —
+    // so cells started at x=16, the column's 324pt ran 16pt past the visible
+    // edge, and text wrapped at the column width was hard-clipped mid-word.
+    // Plain style is what the geometry below (col.width == clip width,
+    // HIST_PAD_SIDE as the only side padding) assumes.
+    if (@available(macOS 11.0, *)) historyTable.style = NSTableViewStylePlain;
     NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"row"];
     col.width = HIST_W - 2 * HIST_PAD_SIDE;
     [historyTable addTableColumn:col];
@@ -798,6 +949,58 @@ static void ensureHistoryUI(void) {
     historyTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
     historyTable.dataSource = historyDS;
     historyTable.delegate = historyDS;
+    // Click-to-paste goes through the action, not the selection (see
+    // FLHistoryDataSource's rowClicked:).
+    historyTable.target = historyDS;
+    historyTable.action = @selector(rowClicked:);
+    // The table never takes typing itself: a click on a row must not steal
+    // first responder from the search field, or Up/Down/Enter would start
+    // going to the table and the user's next keystroke would vanish.
+    historyTable.refusesFirstResponder = YES;
+
+    // The search field: dark, borderless, one line, sitting inside the same
+    // HIST_PAD_SIDE gutter as the table so its text lines up with the rows.
+    historySearch = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    historySearch.editable = YES;
+    historySearch.selectable = YES;
+    historySearch.bordered = NO;
+    historySearch.bezeled = NO;
+    historySearch.drawsBackground = NO;
+    historySearch.focusRingType = NSFocusRingTypeNone;
+    historySearch.font = [NSFont systemFontOfSize:12.0];
+    historySearch.textColor = [NSColor colorWithCalibratedWhite:0.92 alpha:0.92];
+    historySearch.usesSingleLineMode = YES;
+    historySearch.lineBreakMode = NSLineBreakByClipping;
+    historySearch.cell.scrollable = YES;
+    historySearch.placeholderAttributedString = [[NSAttributedString alloc]
+        initWithString:@"Search"
+            attributes:@{ NSFontAttributeName: [NSFont systemFontOfSize:12.0],
+                          NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.92 alpha:0.40] }];
+    historySearch.delegate = historyDS;
+    historySearch.translatesAutoresizingMaskIntoConstraints = NO;
+    historySearch.hidden = YES;
+    historySearch.alphaValue = 0;
+
+    // A hairline, not an NSBox separator: NSBox picks a system separator
+    // colour meant for light/dark chrome, which reads wrong on this black.
+    historySep = [[NSView alloc] initWithFrame:NSZeroRect];
+    historySep.wantsLayer = YES;
+    historySep.layer.backgroundColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.14].CGColor;
+    historySep.translatesAutoresizingMaskIntoConstraints = NO;
+    historySep.hidden = YES;
+    historySep.alphaValue = 0;
+
+    historyEmpty = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    historyEmpty.editable = NO;
+    historyEmpty.bordered = NO;
+    historyEmpty.drawsBackground = NO;
+    historyEmpty.selectable = NO;
+    historyEmpty.alignment = NSTextAlignmentCenter;
+    historyEmpty.font = [NSFont systemFontOfSize:12.0];
+    historyEmpty.textColor = [NSColor colorWithCalibratedWhite:0.92 alpha:0.45];
+    historyEmpty.stringValue = @"No matches";
+    historyEmpty.translatesAutoresizingMaskIntoConstraints = NO;
+    historyEmpty.hidden = YES;
 
     historyScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     historyScroll.documentView = historyTable;
@@ -827,13 +1030,39 @@ static void ensureHistoryUI(void) {
     // for the rest of the panel's life (see the history row cells just above,
     // which already avoid exactly this with constraints instead of a frame).
     historyScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:historySearch];
+    [view addSubview:historySep];
     [view addSubview:historyScroll];
-    [NSLayoutConstraint activateConstraints:@[
+    [view addSubview:historyEmpty];
+    // Built once, but only ACTIVE while the panel is open (see
+    // flowlite_overlay_show_history / closeHistory). A hidden view still
+    // takes part in Auto Layout, so leaving these on would pin a minimum
+    // height of HIST_PAD_TOP + HIST_SEARCH_H + 2*HIST_SEARCH_GAP + 1 +
+    // HIST_PAD_BOTTOM (= 55pt) on `view` for good — and AppKit then refuses
+    // to size the window's content view any smaller, so the plain
+    // PILL_LONG x PILL_SHORT capsule came back as a 100x55 rounded box after
+    // the history panel had been opened once.
+    historyConstraints = @[
+        // Search field across the top, inside the side gutter.
+        [historySearch.leadingAnchor  constraintEqualToAnchor:view.leadingAnchor  constant:HIST_PAD_SIDE],
+        [historySearch.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-HIST_PAD_SIDE],
+        [historySearch.topAnchor      constraintEqualToAnchor:view.topAnchor      constant:HIST_PAD_TOP],
+        [historySearch.heightAnchor   constraintEqualToConstant:HIST_SEARCH_H],
+        // Hairline under it.
+        [historySep.leadingAnchor  constraintEqualToAnchor:view.leadingAnchor  constant:HIST_PAD_SIDE],
+        [historySep.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-HIST_PAD_SIDE],
+        [historySep.topAnchor      constraintEqualToAnchor:historySearch.bottomAnchor constant:HIST_SEARCH_GAP],
+        [historySep.heightAnchor   constraintEqualToConstant:1.0],
+        // The table takes the rest.
         [historyScroll.leadingAnchor  constraintEqualToAnchor:view.leadingAnchor  constant:HIST_PAD_SIDE],
         [historyScroll.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-HIST_PAD_SIDE],
-        [historyScroll.topAnchor      constraintEqualToAnchor:view.topAnchor      constant:HIST_PAD_TOP],
+        [historyScroll.topAnchor      constraintEqualToAnchor:historySep.bottomAnchor constant:HIST_SEARCH_GAP],
         [historyScroll.bottomAnchor   constraintEqualToAnchor:view.bottomAnchor   constant:-HIST_PAD_BOTTOM],
-    ]];
+        // "No matches" sits centred where the table would be.
+        [historyEmpty.leadingAnchor  constraintEqualToAnchor:historyScroll.leadingAnchor],
+        [historyEmpty.trailingAnchor constraintEqualToAnchor:historyScroll.trailingAnchor],
+        [historyEmpty.centerYAnchor  constraintEqualToAnchor:historyScroll.centerYAnchor],
+    ];
 }
 
 // historyTargetFrame anchors the grown panel so it reads as the same object
@@ -872,9 +1101,44 @@ static void installHistoryMonitors(void) {
     if (historyEscMonitor) return;
     historyEscMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
         handler:^NSEvent *(NSEvent *e) {
-            if (view->historyOpen && e.keyCode == 53 /* Escape, see hotkey/tap_darwin.go's escapeKeycode */) {
-                flowlite_overlay_hide_history();
-                return nil; // swallow it
+            if (!view->historyOpen) return e;
+            // Normal path: the panel is key and the search field is first
+            // responder, so the field editor gets the event and
+            // FLHistoryDataSource's doCommandBySelector: handles
+            // Escape/Enter/Up/Down. Let it through untouched.
+            if (panel && [panel isKeyWindow] && [panel firstResponder] != nil &&
+                [panel firstResponder] != (NSResponder *)panel) {
+                return e;
+            }
+            // Fallback: the event reached this process but the panel is not
+            // key (e.g. key status was refused). Route it into the field by
+            // hand so the panel is still fully usable from the keyboard.
+            switch (e.keyCode) {
+                case 53: // Escape, see hotkey/tap_darwin.go's escapeKeycode
+                    if (historySearch.stringValue.length > 0) { historySearch.stringValue = @""; historyApplyFilter(); }
+                    else flowlite_overlay_hide_history();
+                    return nil;
+                case 36: case 76: // Return, keypad Enter
+                    historyPickRow(historyTable.selectedRow >= 0 ? historyTable.selectedRow : 0);
+                    return nil;
+                case 126: historyMoveSelection(-1); return nil; // Up
+                case 125: historyMoveSelection(+1); return nil; // Down
+                case 51: { // Delete
+                    NSString *s = historySearch.stringValue;
+                    if (s.length > 0) {
+                        historySearch.stringValue = [s substringToIndex:s.length - 1];
+                        historyApplyFilter();
+                    }
+                    return nil;
+                }
+                default: break;
+            }
+            if (e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) return e;
+            NSString *chars = e.characters;
+            if (chars.length > 0 && [chars characterAtIndex:0] >= 0x20) {
+                historySearch.stringValue = [historySearch.stringValue stringByAppendingString:chars];
+                historyApplyFilter();
+                return nil;
             }
             return e;
         }];
@@ -906,8 +1170,9 @@ void flowlite_overlay_show_history(const char *entriesJSON) {
         NSData *data = [NSData dataWithBytes:entriesJSON length:strlen(entriesJSON)];
         NSError *jerr = nil;
         NSArray *rows = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jerr];
-        historyRows = [rows isKindOfClass:[NSArray class]] ? rows : @[];
-        [historyTable reloadData];
+        historyAllRows = [rows isKindOfClass:[NSArray class]] ? rows : @[];
+        if (!view->historyOpen) historySearch.stringValue = @""; // a fresh open always starts unfiltered
+        historyApplyFilter(); // (re)derives historyRows and reloads the table
 
         if (view->historyOpen) return; // already open: the list above is all that changes
 
@@ -935,12 +1200,18 @@ void flowlite_overlay_show_history(const char *entriesJSON) {
         double h = fmin(HIST_H, vis.size.height - 2 * edgeGap());
         NSRect target = historyTargetFrame(startFrame, w, h);
 
-        // historyScroll's size/position now come entirely from the Auto
-        // Layout constraints installed once in ensureHistoryUI, which track
-        // `view`'s own bounds as the panel resizes (see the animation below)
-        // — no frame to set here any more.
+        // historyScroll's size/position come entirely from the Auto Layout
+        // constraints built once in ensureHistoryUI, which track `view`'s
+        // own bounds as the panel resizes (see the animation below). They
+        // are switched on only now, and off again in closeHistory, so the
+        // plain pill is never held to the panel's minimum height.
+        [NSLayoutConstraint activateConstraints:historyConstraints];
         historyScroll.alphaValue = 0;
         historyScroll.hidden = NO;
+        historySearch.alphaValue = 0;
+        historySearch.hidden = NO;
+        historySep.alphaValue = 0;
+        historySep.hidden = NO;
 
         // The ONE place in this file ignoresMouseEvents becomes NO: a table
         // you cannot click is pointless. Reverted in closeHistory below the
@@ -948,7 +1219,19 @@ void flowlite_overlay_show_history(const char *entriesJSON) {
         [panel setIgnoresMouseEvents:NO];
         [panel setAlphaValue:1.0];
         [panel setFrame:startFrame display:YES];
-        [panel orderFrontRegardless];
+        // ...and the ONE place it becomes key: typing has to land in the
+        // search field. FLPanel + NSWindowStyleMaskNonactivatingPanel make
+        // this possible without activating FlowLite, so the user's app stays
+        // frontmost the whole time. Given back in historyResignKey.
+        historyKeyAllowed = YES;
+        [panel makeKeyAndOrderFront:nil];
+        [panel makeFirstResponder:historySearch];
+        // The field editor is a shared NSTextView whose caret defaults to
+        // black — invisible on this surface.
+        NSTextView *fe = (NSTextView *)[panel fieldEditor:YES forObject:historySearch];
+        if ([fe isKindOfClass:[NSTextView class]]) {
+            fe.insertionPointColor = [NSColor colorWithCalibratedWhite:0.92 alpha:0.92];
+        }
 
         installHistoryMonitors();
 
@@ -961,6 +1244,8 @@ void flowlite_overlay_show_history(const char *entriesJSON) {
             [ctx setTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
             [[panel animator] setFrame:target display:YES];
             [[historyScroll animator] setAlphaValue:1.0];
+            [[historySearch animator] setAlphaValue:1.0];
+            [[historySep animator] setAlphaValue:1.0];
         } completionHandler:^{
             // nothing further to do — the panel is already interactive
         }];
@@ -970,24 +1255,42 @@ void flowlite_overlay_show_history(const char *entriesJSON) {
 static void closeHistory(void) {
     if (!view || !view->historyOpen || !panel) return;
     removeHistoryMonitors();
+    // Give keyboard focus back to the user's app right away (a no-op if a
+    // pick already did it) — never after the animation, or an Escape-close
+    // would leave their typing going nowhere for a quarter second.
+    historyResignKey();
 
     NSScreen *scr = targetScreen ?: [NSScreen mainScreen];
     computeOrigin(scr, pillWidth(), pillHeight());
     NSRect pillFrame = NSMakeRect(baseOrigin.x, baseOrigin.y, pillWidth(), pillHeight());
+
+    // Release the layout BEFORE the shrink starts: while active it holds the
+    // content view at >= 55pt tall, and the window would stop short of the
+    // pill's 30pt. The subviews keep their last frames (they are fading out
+    // anyway) and are simply clipped as the window closes over them.
+    [NSLayoutConstraint deactivateConstraints:historyConstraints];
 
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
         [ctx setDuration:HIST_ANIM_DUR];
         [ctx setTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
         [[panel animator] setFrame:pillFrame display:YES];
         [[historyScroll animator] setAlphaValue:0.0];
+        [[historySearch animator] setAlphaValue:0.0];
+        [[historySep animator] setAlphaValue:0.0];
     } completionHandler:^{
         historyScroll.hidden = YES;
+        historySearch.hidden = YES;
+        historySep.hidden = YES;
+        historyEmpty.hidden = YES;
+        historyTable.hidden = NO;
         [panel setIgnoresMouseEvents:YES]; // restore the "never takes focus" invariant
         [panel setAlphaValue:0];
         [panel orderOut:nil];
         view->historyOpen = NO;
         view->state = ST_HIDDEN;
+        historyAllRows = @[];
         historyRows = @[];
+        historySearch.stringValue = @"";
         [historyTable reloadData];
         flowliteHistoryClosed();
     }];
@@ -997,6 +1300,48 @@ void flowlite_overlay_hide_history(void) {
     @autoreleasepool { closeHistory(); }
 }
 
+// flowlite_overlay_history_set_query replaces the search field's text and
+// re-filters, exactly as if the user had typed it. Exists for
+// --history-preview-query so a filtered panel can be snapshotted offline.
+void flowlite_overlay_history_set_query(const char *query) {
+    @autoreleasepool {
+        if (!historySearch) return;
+        historySearch.stringValue = [NSString stringWithUTF8String:query ?: ""];
+        // setStringValue on a field being edited selects the whole text;
+        // a user who typed it would have the caret at the end instead.
+        NSText *fe = [historySearch currentEditor];
+        if (fe) fe.selectedRange = NSMakeRange(historySearch.stringValue.length, 0);
+        historyApplyFilter();
+    }
+}
+
+// flowlite_overlay_history_has_key reports whether the panel currently holds
+// keyboard focus — what decides whether typing reaches the search field
+// directly or only via the local-monitor fallback. Diagnostic, for the
+// preview.
+bool flowlite_overlay_history_has_key(void) {
+    return panel != nil && [panel isKeyWindow];
+}
+
 bool flowlite_overlay_history_open(void) {
     return view != NULL && view->historyOpen;
+}
+
+// flowlite_overlay_snapshot_window renders the panel's content view — at
+// whatever size it currently has, subviews included — so the grown history
+// panel can be inspected the same way flowlite_overlay_snapshot inspects the
+// pill. Layout is flushed first so pending Auto Layout passes land in the
+// image rather than in the next frame.
+bool flowlite_overlay_snapshot_window(const char *path) {
+    @autoreleasepool {
+        ensurePanel();
+        NSView *cv = [panel contentView];
+        [cv layoutSubtreeIfNeeded];
+        [cv displayIfNeeded];
+        NSBitmapImageRep *rep = [cv bitmapImageRepForCachingDisplayInRect:[cv bounds]];
+        if (!rep) return false;
+        [cv cacheDisplayInRect:[cv bounds] toBitmapImageRep:rep];
+        NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        return [png writeToFile:[NSString stringWithUTF8String:path] atomically:YES];
+    }
 }

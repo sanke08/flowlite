@@ -96,3 +96,12 @@ func HideHistory() { hideHistory() }
 
 // IsHistoryOpen reports whether the history panel is currently showing.
 func IsHistoryOpen() bool { return isHistoryOpen() }
+
+// SetHistoryQuery sets the history panel's search field to query and applies
+// the filter, exactly as if the user had typed it. Intended for previews and
+// tests; the daemon never needs it since the user types into the field.
+func SetHistoryQuery(query string) { setHistoryQuery(query) }
+
+// HistoryHasKey reports whether the history panel currently holds keyboard
+// focus (so typing reaches its search field directly). Diagnostic only.
+func HistoryHasKey() bool { return historyHasKey() }

@@ -35,7 +35,14 @@ var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the background FlowLite daemon",
 	Args:  cobra.NoArgs,
-	RunE:  func(cmd *cobra.Command, args []string) error { return stopBackground() },
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// A forced kill still leaves nothing running, which is what the user
+		// asked for; the "forced" line is the warning. Exit 0.
+		if err := stopBackground(); err != nil && !errors.Is(err, errForcedStop) {
+			return err
+		}
+		return nil
+	},
 }
 
 func init() {
@@ -78,13 +85,18 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 		}
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// Windows cannot deliver SIGTERM to a detached process; `flowlite stop`
+	// there sets a named event instead, which cancels ctx the same way. It
+	// is armed before the pidfile is written so a stop that reads the pid
+	// always finds the event and never has to fall back to a hard kill.
+	watchStopRequest(stop)
+
 	if err := writePID(detached); err != nil {
 		logger.Printf("pidfile: %v", err)
 	}
 	defer removePID()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// SIGHUP means "a setting changed, or the binary on disk did": finish
 	// whatever is in flight, then replace this process with a fresh copy of
@@ -239,8 +251,16 @@ func spawnDaemon() (*exec.Cmd, error) {
 	return c, nil
 }
 
+// errForcedStop is returned by stopBackground when the daemon ignored the
+// graceful stop for 45 s and had to be killed. The daemon is gone and the
+// pidfile removed, but whatever it was doing — most likely a transcription in
+// flight — was lost. Callers decide whether that is merely worth the warning
+// line stopBackground already printed, or a reason not to proceed.
+var errForcedStop = errors.New("daemon did not stop cleanly and was killed")
+
 // stopBackground terminates whichever daemon the pidfile points at — the
-// background one, or a foreground `flowlite` in another window.
+// background one, or a foreground `flowlite` in another window. A forced
+// kill returns errForcedStop; the daemon is still stopped in that case.
 func stopBackground() error {
 	pid, running := daemonRunning()
 	if !running {
@@ -248,18 +268,35 @@ func stopBackground() error {
 		removePID()
 		return nil
 	}
-	if err := terminate(pid); err != nil {
-		return err
+	// On Windows terminate itself falls back to TerminateProcess when the
+	// daemon has no stop event to set; that is still a forced stop and is
+	// reported as one once the pid has gone.
+	termErr := terminate(pid)
+	if termErr != nil && !errors.Is(termErr, errForcedStop) {
+		return termErr
 	}
 	// Shutdown waits for any transcription in flight, so this has to allow
 	// for a slow model finishing a long recording, not just process teardown.
-	for i := 0; i < 150; i++ {
+	// 45s: the same budget startBackground and waitForReload give.
+	for range 450 {
 		time.Sleep(100 * time.Millisecond)
 		if _, still := daemonRunning(); !still {
 			removePID()
+			if termErr != nil {
+				fmt.Printf("%s stopped (pid %d, forced)\n", warn("!"), pid)
+				return errForcedStop
+			}
 			fmt.Printf("%s stopped (pid %d)\n", ok("✓"), pid)
 			return nil
 		}
+	}
+	// A graceful request that went unanswered: on Windows escalate to
+	// TerminateProcess rather than leave a stale daemon holding the exe and
+	// the hotkey; elsewhere this is unsupported and the error stands.
+	if err := forceTerminate(pid); err == nil {
+		removePID()
+		fmt.Printf("%s stopped (pid %d, forced)\n", warn("!"), pid)
+		return errForcedStop
 	}
 	return fmt.Errorf("pid %d did not exit", pid)
 }
@@ -380,7 +417,9 @@ func applyToRunningDaemon(what string) error {
 		return waitForReload(what)
 	}
 	fmt.Println(dim("  restarting FlowLite to apply " + what + "…"))
-	if err := stopBackground(); err != nil {
+	// The settings are already on disk; a forced kill lost at most a
+	// transcription, and the fresh daemon applies them either way.
+	if err := stopBackground(); err != nil && !errors.Is(err, errForcedStop) {
 		return err
 	}
 	return startBackground()

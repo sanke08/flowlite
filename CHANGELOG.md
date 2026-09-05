@@ -5,6 +5,57 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-06
+
+### Added
+- **"Restart for updates" setting** (on by default). On Windows, where the
+  running `.exe` is locked, `flowlite update` now stops the daemon cleanly,
+  swaps the binary and starts it again, instead of handing you a manual
+  `move` command. Off keeps the manual step.
+- **"Hands-free auto-stop" setting.** A hands-free recording now stops itself
+  after 5.5 s of silence, so a forgotten toggle no longer runs to the maximum
+  duration. The delay is configurable; 0 turns it off. Push-to-talk is never
+  auto-stopped.
+- **Search in the history panel.** Type to filter the recent transcripts as
+  you go; Enter pastes the first match. Escape clears the search first, then
+  closes the panel.
+
+### Changed
+- History keeps the newest 50 transcripts (was 100); the oldest are dropped as
+  new ones arrive.
+
+### Fixed
+- **macOS: the history panel drew its black body at 80% size** and let rows
+  run past its edge — an inset table style plus a pop spring that never
+  finished. Both are fixed; the panel fills its frame and clips its rows.
+- **Windows: the hidden wake window and the pill could fail to register.**
+  The `WNDCLASSEXW` struct both used was 8 bytes too large (two `int` fields
+  declared pointer-sized), so `RegisterClassExW` could reject it and the
+  failure went unchecked. The layout is now shared, size-checked at start-up,
+  and a registration failure is logged instead of ignored.
+- `flowlite update` no longer replaces the binary after it had to kill the
+  daemon (a transcription in flight was likely lost); it restarts the current
+  version and asks you to retry when FlowLite is idle.
+- **Windows: stopping the daemon is graceful.** `flowlite stop`, settings
+  changes and updates used a hard kill, which destroyed a transcription in
+  flight and skipped the clipboard restore. The daemon now listens for a stop
+  request and shuts down exactly as it does on macOS; a hard kill is only the
+  fallback after 45 s.
+- **Windows: sound cues come back after sleep and after audio devices change**
+  (headphones, Bluetooth, display audio). The output stream is rebuilt on
+  resume and on device arrival/removal.
+- **Windows: clipboard and paste keystroke run on one OS thread**, as the
+  Win32 clipboard API requires; the clipboard can no longer be left open
+  system-wide after an error.
+- A key press during the second a settings reload takes no longer reaches a
+  half-closed daemon (red error pill, pill re-shown after hide).
+- The sound player can no longer be reopened by its watchdog after it was
+  closed, which leaked an audio device per reload on Windows and Linux.
+- Two daemons compacting the history file during a reload could clobber each
+  other's rewrite; the rewrite now uses a unique temporary file.
+- `flowlite stop` waits up to 45 s (was 15 s) for a long transcription to
+  finish before reporting that the daemon did not exit, on every platform.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/gen2brain/malgo"
@@ -49,6 +50,8 @@ type Recorder struct {
 	running  bool // IO started on dev
 	buf      []float32
 	level    float64
+	rms      float64   // raw RMS of the most recent callback buffer, unsmoothed
+	lastData time.Time // when onData last ran; see RMS
 	overflow bool
 }
 
@@ -114,6 +117,30 @@ func (r *Recorder) Level() float64 {
 	return r.level
 }
 
+// rmsStale is how long RMS trusts the last callback. Callbacks arrive every
+// 40 ms (PeriodSizeInMilliseconds), so 250 ms is six missed periods: the
+// stream has stalled or stopped, not merely jittered.
+const rmsStale = 250 * time.Millisecond
+
+// RMS is the raw, unsmoothed RMS of the most recent capture callback, on the
+// same scale speech.SpeechRMS is measured on, so a live speech/silence
+// decision agrees with the offline gate in speech.HasSpeech.
+//
+// It reports 0 once no callback has run for rmsStale. The value is only
+// written by onData, so a stream that stalls (device unplugged, backend
+// wedged, or simply stopped) would otherwise pin RMS at whatever the last
+// buffer held — loud, if the user was mid-word — and the hands-free
+// auto-stop in daemon.tick would never see silence and never close the
+// recording. A stalled stream reading as silence lets it stop normally.
+func (r *Recorder) RMS() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if time.Since(r.lastData) > rmsStale {
+		return 0
+	}
+	return r.rms
+}
+
 // Duration is how much audio has been captured so far.
 func (r *Recorder) Duration() float64 {
 	r.mu.Lock()
@@ -148,6 +175,8 @@ func (r *Recorder) onData(_ []byte, in []byte, frames uint32) {
 	}
 	// Smooth the meter a little so the pill doesn't strobe.
 	r.level = 0.5*r.level + 0.5*math.Min(rms*12, 1)
+	r.rms = rms
+	r.lastData = time.Now()
 	r.mu.Unlock()
 }
 
@@ -228,6 +257,10 @@ func (r *Recorder) Start() error {
 	}
 	r.buf = r.buf[:0]
 	r.level = 0
+	r.rms = 0
+	// Fresh grace period: the first callback is up to a period away, and a
+	// recording must not begin by reading as a stalled stream.
+	r.lastData = time.Now()
 	r.overflow = false
 	if err := r.dev.Start(); err != nil {
 		// The device we were holding may be gone (unplugged, or the system

@@ -1,10 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -57,14 +57,12 @@ func uninstallFlowLite() (bool, error) {
 	// Wait for it to actually exit. Its deferred removePID calls config.Dir(),
 	// which MkdirAlls — so removing the directory while the daemon is still
 	// dying puts it straight back, and "FlowLite removed" is a lie.
-	if pid, running := daemonRunning(); running {
-		_ = terminate(pid)
-		for i := 0; i < 150 && running; i++ {
-			time.Sleep(100 * time.Millisecond)
-			_, running = daemonRunning()
-		}
-		if running {
-			return false, fmt.Errorf("FlowLite (pid %d) is still running — stop it first: flowlite stop", pid)
+	// stopBackground gives a transcription in flight 45 s to finish and on
+	// Windows escalates to TerminateProcess after that; a forced stop is
+	// still a stopped daemon, and its warning line has already been printed.
+	if _, running := daemonRunning(); running {
+		if err := stopBackground(); err != nil && !errors.Is(err, errForcedStop) {
+			return false, fmt.Errorf("%w — stop it first: flowlite stop", err)
 		}
 	}
 	if err := os.RemoveAll(dir); err != nil {

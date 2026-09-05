@@ -63,6 +63,14 @@ type Player struct {
 	// device and step on whichever field the other just wrote — leaking one
 	// stream or double-freeing another.
 	lifecycleMu sync.Mutex
+
+	// closed is set by Close (under lifecycleMu) and never cleared. Reopen
+	// checks it under the same lock so a wake notification or the watchdog
+	// that lost the race with Close cannot open a fresh context+device onto a
+	// Player nobody will ever Close again — which would leak one stream per
+	// reload and keep playing cues after shutdown. watch also polls it so the
+	// goroutine exits even if it is mid-iteration when Close runs.
+	closed atomic.Bool
 }
 
 type voice struct {
@@ -146,7 +154,8 @@ func (p *Player) report() {
 
 // watch is the stream watchdog: a stream that stops asking for samples
 // while dev is live is rebuilt without waiting for a Play to notice. Runs
-// for the Player's lifetime; Close stops it.
+// for the Player's lifetime; Close stops it (by closing watchStop and by
+// setting closed, either of which ends the loop).
 func (p *Player) watch() {
 	t := time.NewTicker(100 * time.Millisecond)
 	defer t.Stop()
@@ -155,6 +164,9 @@ func (p *Player) watch() {
 		case <-p.watchStop:
 			return
 		case <-t.C:
+		}
+		if p.closed.Load() {
+			return
 		}
 		if p.dev.Load() == nil {
 			continue
@@ -257,6 +269,11 @@ func (p *Player) Reopen() {
 	}
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
+	if p.closed.Load() {
+		// Close won the race (or already ran): the device it freed must
+		// stay freed. Opening another one here would have no owner.
+		return
+	}
 
 	p.mu.Lock()
 	oldDev, oldCtx := p.dev.Swap(nil), p.ctx
@@ -422,21 +439,22 @@ func (p *Player) Play(c Cue) {
 	p.active = append(p.active, voice{buf: buf})
 }
 
-// Close releases the device.
+// Close releases the device. Idempotent: a second Close is a no-op, and any
+// Reopen that starts after (or is waiting on lifecycleMu during) the first
+// Close returns without opening anything.
 func (p *Player) Close() {
 	if p == nil {
 		return
 	}
 	p.StopWorking()
-	if p.watchStop != nil {
-		select {
-		case <-p.watchStop:
-		default:
-			close(p.watchStop)
-		}
-	}
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
+	if p.closed.Swap(true) {
+		return // already closed; the watchdog was stopped by the first call
+	}
+	if p.watchStop != nil {
+		close(p.watchStop) // exactly once: guarded by the closed flag above
+	}
 
 	p.mu.Lock()
 	dev, ctx := p.dev.Swap(nil), p.ctx

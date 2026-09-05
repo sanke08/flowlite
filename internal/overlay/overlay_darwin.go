@@ -13,9 +13,12 @@ void flowlite_overlay_set_state(int state, const char *text);
 void flowlite_overlay_set_level(float level);
 void flowlite_overlay_hide(void);
 bool flowlite_overlay_snapshot(const char *path);
+bool flowlite_overlay_snapshot_window(const char *path);
 void flowlite_overlay_show_history(const char *entriesJSON);
 void flowlite_overlay_hide_history(void);
 bool flowlite_overlay_history_open(void);
+void flowlite_overlay_history_set_query(const char *query);
+bool flowlite_overlay_history_has_key(void);
 
 // Called back from overlay_darwin.m when the user acts on the history panel.
 extern void flowliteHistoryPick(int index);
@@ -84,6 +87,23 @@ func Snapshot(path string) error {
 	return nil
 }
 
+// SnapshotWindow is Snapshot for the whole panel: it renders the window's
+// content view at its CURRENT size (the pill, or the grown history panel)
+// including every AppKit subview, so the history panel's real layout can be
+// inspected offline the same way Snapshot inspects the pill's drawing.
+func SnapshotWindow(path string) error {
+	var ok bool
+	mainloop.DispatchSync(func() {
+		c := C.CString(path)
+		defer C.free(unsafe.Pointer(c))
+		ok = bool(C.flowlite_overlay_snapshot_window(c))
+	})
+	if !ok {
+		return errors.New("could not render the panel")
+	}
+	return nil
+}
+
 // ---- history panel --------------------------------------------------------
 
 var (
@@ -142,6 +162,23 @@ func isHistoryOpen() bool {
 	var open bool
 	mainloop.DispatchSync(func() { open = bool(C.flowlite_overlay_history_open()) })
 	return open
+}
+
+// setHistoryQuery types query into the panel's search field (replacing what
+// is there) and re-filters the rows.
+func setHistoryQuery(query string) {
+	mainloop.Dispatch(func() {
+		c := C.CString(query)
+		defer C.free(unsafe.Pointer(c))
+		C.flowlite_overlay_history_set_query(c)
+	})
+}
+
+// historyHasKey reports whether the panel currently holds keyboard focus.
+func historyHasKey() bool {
+	var key bool
+	mainloop.DispatchSync(func() { key = bool(C.flowlite_overlay_history_has_key()) })
+	return key
 }
 
 //export flowliteHistoryPick

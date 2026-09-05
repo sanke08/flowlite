@@ -4,6 +4,7 @@ package inject
 
 import (
 	"errors"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -36,17 +37,35 @@ const (
 
 var errRoundTrip = errors.New("clipboard read-back did not match")
 
-// withClipboard retries briefly: another process may hold the clipboard open.
+// pinned runs fn on one OS thread. The clipboard is owned per thread —
+// OpenClipboard, SetClipboardData and CloseClipboard must all come from the
+// same one or CloseClipboard fails and the clipboard stays open system-wide —
+// and SendInput is delivered from the calling thread's input queue. The Go
+// scheduler is free to move a goroutine between threads at any call, so
+// each of those sequences is pinned for its duration.
+func pinned(fn func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return fn()
+}
+
+// withClipboard opens the clipboard, runs fn and always closes it again,
+// whatever fn returns. It retries briefly: another process may hold the
+// clipboard open.
 func withClipboard(fn func() error) error {
-	for i := 0; i < 10; i++ {
-		r, _, _ := procOpenClipboard.Call(0)
-		if r != 0 {
-			defer procCloseClipboard.Call()
-			return fn()
+	return pinned(func() error {
+		for i := 0; i < 10; i++ {
+			r, _, _ := procOpenClipboard.Call(0)
+			if r != 0 {
+				return func() error {
+					defer procCloseClipboard.Call()
+					return fn()
+				}()
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return errors.New("could not open the Windows clipboard")
+		return errors.New("could not open the Windows clipboard")
+	})
 }
 
 func clipboardGet() (string, bool) {
@@ -127,11 +146,13 @@ func pasteKeystroke() error {
 		{typ: inputKeyboard, ki: keybdInput{wVk: vkV, dwFlags: keyEventFKeyUp}},
 		{typ: inputKeyboard, ki: keybdInput{wVk: vkControl, dwFlags: keyEventFKeyUp}},
 	}
-	n, _, err := procSendInput.Call(uintptr(len(seq)), uintptr(unsafe.Pointer(&seq[0])), unsafe.Sizeof(seq[0]))
-	if int(n) != len(seq) {
-		return errors.Join(errors.New("SendInput did not deliver the paste"), err)
-	}
-	return nil
+	return pinned(func() error {
+		n, _, err := procSendInput.Call(uintptr(len(seq)), uintptr(unsafe.Pointer(&seq[0])), unsafe.Sizeof(seq[0]))
+		if int(n) != len(seq) {
+			return errors.Join(errors.New("SendInput did not deliver the paste"), err)
+		}
+		return nil
+	})
 }
 
 // clipboardSerial is Windows' clipboard sequence number: it advances on every

@@ -16,6 +16,10 @@ import (
 
 const appDir = "FlowLite"
 
+// DefaultHandsFreeSilenceSeconds is how long a hands-free recording waits
+// through silence before stopping itself.
+const DefaultHandsFreeSilenceSeconds = 5.5
+
 // Config is everything the user can change.
 type Config struct {
 	Model            string `json:"model"` // catalog key; "" until setup
@@ -25,21 +29,28 @@ type Config struct {
 	InputDevice      string `json:"input_device"`      // device name; "" = default
 	RestoreClipboard bool   `json:"restore_clipboard"`
 	Sounds           bool   `json:"sounds"`
-	MaxSeconds       int    `json:"max_seconds"`     // hard stop for a forgotten toggle
-	PillPosition     string `json:"pill_position"`   // screen edge the pill sits on: bottom, top, left, right
-	HistoryEnabled   bool   `json:"history_enabled"` // whether transcripts are remembered at all
+	MaxSeconds       int    `json:"max_seconds"` // hard stop for a forgotten toggle
+	// HandsFreeSilenceSeconds: a hands-free recording stops on its own after
+	// this much continuous silence, as if the user had tapped. 0 disables.
+	// Push-to-talk (key held) is never affected.
+	HandsFreeSilenceSeconds float64 `json:"hands_free_silence_seconds"`
+	PillPosition            string  `json:"pill_position"`   // screen edge the pill sits on: bottom, top, left, right
+	HistoryEnabled          bool    `json:"history_enabled"` // whether transcripts are remembered at all
+	UpdateRestart           bool    `json:"update_restart"`  // Windows: stop and restart the daemon so `flowlite update` can replace the locked exe
 }
 
 // Default is a fresh, unconfigured settings object.
 func Default() *Config {
 	return &Config{
-		Hotkey:           hotkey.DefaultName(),
-		HoldThresholdMS:  400,
-		RestoreClipboard: true,
-		Sounds:           true,
-		MaxSeconds:       300,
-		PillPosition:     "bottom",
-		HistoryEnabled:   true,
+		Hotkey:                  hotkey.DefaultName(),
+		HoldThresholdMS:         400,
+		RestoreClipboard:        true,
+		Sounds:                  true,
+		MaxSeconds:              300,
+		HandsFreeSilenceSeconds: DefaultHandsFreeSilenceSeconds,
+		PillPosition:            "bottom",
+		HistoryEnabled:          true,
+		UpdateRestart:           true,
 	}
 }
 
@@ -128,6 +139,9 @@ func Load() (*Config, error) {
 	}
 	if c.MaxSeconds <= 0 {
 		c.MaxSeconds = 300
+	}
+	if c.HandsFreeSilenceSeconds < 0 {
+		c.HandsFreeSilenceSeconds = 0
 	}
 	if !hotkey.Valid(c.Hotkey) {
 		c.Hotkey = hotkey.DefaultName()

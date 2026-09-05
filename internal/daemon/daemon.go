@@ -73,6 +73,18 @@ type Daemon struct {
 	// closing is set the moment shutdown starts, so a transcription already
 	// running knows not to paste or touch the pill on its way out.
 	closing atomic.Bool
+	// closed is set on the first line of Close and makes the event loop
+	// inert: handle/act/tick/micFailed return at once, so a key press that
+	// lands while (or after) the tap, model, player and pill are torn down can
+	// no longer reach a closed model ("model is closed" -> red Error pill), a
+	// closed player, or re-raise a pill after overlay.Hide. closing alone is
+	// not enough for that: it is set part-way through Close and only guards
+	// the paste/pill tail of a transcription already in flight.
+	closed atomic.Bool
+	// done is closed by Close (exactly once, via closeOnce) so Run's select
+	// notices shutdown instead of handling events for up to another tick.
+	done      chan struct{}
+	closeOnce sync.Once
 	// recGen counts start() calls. A microphone open that fails hands its
 	// error back asynchronously (see start); recGen lets that handler tell
 	// whether the gesture it was opening for is still the current one, or
@@ -80,6 +92,11 @@ type Daemon struct {
 	recGen atomic.Uint64
 
 	busy sync.Mutex // serialises transcriptions and paste-last against Close
+
+	// silence times the trailing quiet of a hands-free recording so tick can
+	// stop it on its own (see cfg.HandsFreeSilenceSeconds). Reset on every
+	// start(); only consulted while the machine is in HandsFree.
+	silence speech.Silence
 
 	// NoPaste skips the paste keystroke: transcripts only go to Transcribed.
 	NoPaste bool
@@ -161,6 +178,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 		events:  make(chan hotkey.KeyEvent, 64),
 		micErr:  make(chan uint64, 4),
 		hist:    hist,
+		done:    make(chan struct{}),
 	}
 	mainloop.OnWake(d.wake)
 	return d, nil
@@ -195,6 +213,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			d.Close()
 			return nil
+		case <-d.done:
+			// Close was called from elsewhere (run.go's SIGHUP reload). Stop
+			// driving gestures: everything handle/tick would touch is gone.
+			// Do NOT return yet, though — Run returning stops the main loop
+			// and ends the process, and the reload goroutine that called
+			// Close still has to spawn (or exec) the replacement daemon after
+			// Close comes back. Sit here inert until the context is cancelled,
+			// which is how that goroutine (or a signal) ends the process.
+			// Close is idempotent, so calling it again on the way out is
+			// harmless and keeps the ctx path uniform.
+			tick.Stop()
+			<-ctx.Done()
+			d.Close()
+			return nil
 		case ev := <-d.events:
 			d.handle(ev)
 		case gen := <-d.micErr:
@@ -205,8 +237,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
-// Close releases everything. Safe to call more than once.
+// Close releases everything. Safe to call more than once: the flag and
+// channel below flip once, and every step after them is a no-op on a nil or
+// already-freed handle (tap is nilled here; Model.Close, Player.Close and
+// Recorder.Close each check their own handle before freeing it).
 func (d *Daemon) Close() {
+	// First thing, before any teardown: make the event loop inert, so a key
+	// event or tick racing this call cannot use what is about to be freed.
+	d.closed.Store(true)
+	d.closeOnce.Do(func() { close(d.done) })
 	if d.tap != nil {
 		tap := d.tap
 		d.tap = nil
@@ -273,6 +312,9 @@ func (d *Daemon) modifierHeld() bool {
 }
 
 func (d *Daemon) handle(ev hotkey.KeyEvent) {
+	if d.closed.Load() {
+		return
+	}
 	// Let time settle any pending gesture first so a press is judged
 	// against an up-to-date machine (a tick may be up to 50 ms late).
 	d.act(d.machine.Expire(d.modifierHeld()))
@@ -284,6 +326,9 @@ func (d *Daemon) handle(ev hotkey.KeyEvent) {
 }
 
 func (d *Daemon) act(e hotkey.Event) {
+	if d.closed.Load() {
+		return
+	}
 	switch e {
 	case hotkey.Start:
 		d.start()
@@ -326,6 +371,7 @@ func (d *Daemon) start() {
 	// opening waits out that same brief window rather than every press
 	// paying for it up front.
 	gen := d.recGen.Add(1)
+	d.silence.Reset(time.Now())
 	d.setState(Recording)
 	go func() {
 		if err := d.rec.Start(); err != nil {
@@ -345,7 +391,7 @@ func (d *Daemon) start() {
 // guards against a newer gesture having already begun by the time the error
 // comes back — that one is not this handler's to touch.
 func (d *Daemon) micFailed(gen uint64) {
-	if d.recGen.Load() != gen {
+	if d.closed.Load() || d.recGen.Load() != gen {
 		return
 	}
 	d.machine.Reset()
@@ -368,7 +414,7 @@ func (d *Daemon) confirm() {
 }
 
 func (d *Daemon) finish() {
-	if d.getState() != Recording {
+	if d.closed.Load() || d.getState() != Recording {
 		return
 	}
 	samples := d.rec.Stop()
@@ -419,6 +465,9 @@ func (d *Daemon) cancel() {
 // pasteLast is the triple tap: paste the previous transcript again, for
 // when the last one landed nowhere because no field had focus.
 func (d *Daemon) pasteLast() {
+	if d.closed.Load() {
+		return
+	}
 	switch d.getState() {
 	case Transcribing:
 		return // the pill is busy; the machine is already idle
@@ -581,6 +630,9 @@ func (d *Daemon) hideAfter(delay time.Duration) {
 // (or, if already open, closes) the history panel — reachable only from
 // Idle, so none of the pill's own gen/pillUp bookkeeping is involved.
 func (d *Daemon) toggleHistory() {
+	if d.closed.Load() {
+		return
+	}
 	if d.getState() == Recording {
 		d.rec.Cancel()
 	}
@@ -599,7 +651,7 @@ func (d *Daemon) toggleHistory() {
 	// Note: d.cfg.HistoryEnabled gates whether remember() writes NEW entries
 	// — it says nothing about whether existing history can be browsed, so it
 	// is deliberately not checked here.
-	entries, err := d.hist.List(50)
+	entries, err := d.hist.List(history.Keep)
 	if err != nil || len(entries) == 0 {
 		d.show(overlay.Error, "No transcripts yet")
 		d.player.Play(sound.Error)
@@ -643,6 +695,9 @@ func historyPreviewText(s string) string {
 }
 
 func (d *Daemon) tick() {
+	if d.closed.Load() {
+		return
+	}
 	// Time is what tells a tap from a hold and a lone tap from the start
 	// of a double-tap; the machine finds out here.
 	d.act(d.machine.Expire(d.modifierHeld()))
@@ -656,5 +711,28 @@ func (d *Daemon) tick() {
 		d.log.Printf("max duration (%ds) reached; stopping", d.cfg.MaxSeconds)
 		d.machine.Reset()
 		d.finish()
+		return
+	}
+	// Hands-free only: nothing is held, so a forgotten recording would
+	// otherwise run to MaxSeconds. Push-to-talk stops on release and is
+	// never auto-stopped, however quiet the user is.
+	//
+	// The microphone opens asynchronously (see start), and until the
+	// first samples arrive RMS reads 0 — indistinguishable from silence. The
+	// tracker is re-seeded rather than fed during that gap so a slow device
+	// open never counts towards the silence limit.
+	if d.machine.State() == hotkey.HandsFree {
+		now := time.Now()
+		if d.rec.Duration() == 0 {
+			d.silence.Reset(now)
+			return
+		}
+		d.silence.Observe(d.rec.RMS(), now)
+		limit := time.Duration(d.cfg.HandsFreeSilenceSeconds * float64(time.Second))
+		if d.silence.ShouldStop(now, limit) {
+			d.log.Printf("hands-free: %.1f s of silence; stopping", d.silence.Quiet(now).Seconds())
+			d.machine.Reset()
+			d.finish()
+		}
 	}
 }

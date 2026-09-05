@@ -54,6 +54,9 @@ var (
 var (
 	rootDaemon      bool   // background re-exec target: log to file, no banner
 	rootPillPreview string // show the pill at this edge for ~3 s, then exit
+	rootHistPreview string // open the history panel at this edge, snapshot, exit
+	rootHistOut     string // PNG path for --history-preview's snapshot ("" = none)
+	rootHistQuery   string // search text to type into the panel before the snapshot
 	rootPlayCues    bool   // play the six audio cues, then exit
 	rootNoPaste     bool   // user-facing: print transcripts instead of pasting
 )
@@ -106,6 +109,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// Plumbing flags first; they are complete commands in themselves.
 	if rootPillPreview != "" {
 		return pillPreview(rootPillPreview)
+	}
+	if rootHistPreview != "" {
+		return historyPreview(rootHistPreview, rootHistOut, rootHistQuery)
 	}
 	if rootPlayCues {
 		return playCues()
@@ -307,6 +313,12 @@ func init() {
 	f.StringVar(&rootPillPreview, "pill-preview", "", "internal: show the pill at this edge for a few seconds")
 	f.BoolVar(&rootPlayCues, "play-cues", false, "internal: play the audio cues")
 	_ = f.MarkHidden("daemon")
+	f.StringVar(&rootHistPreview, "history-preview", "", "internal: open the history panel at this edge with sample rows")
+	f.StringVar(&rootHistOut, "history-preview-out", "", "internal: with --history-preview, write PNG snapshots here")
+	f.StringVar(&rootHistQuery, "history-preview-query", "", "internal: with --history-preview, filter the panel by this text first")
 	_ = f.MarkHidden("pill-preview")
+	_ = f.MarkHidden("history-preview")
+	_ = f.MarkHidden("history-preview-out")
+	_ = f.MarkHidden("history-preview-query")
 	_ = f.MarkHidden("play-cues")
 }

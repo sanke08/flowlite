@@ -21,10 +21,16 @@ import (
 const FileName = "history.jsonl"
 
 const (
-	// Keep is how many entries survive a compaction.
-	Keep = 100
-	// CompactAt is the file length that triggers a compaction.
-	CompactAt = 150
+	// Keep is the most entries the history ever exposes: List never returns
+	// more than Keep, and every compaction trims the file to exactly the
+	// newest Keep entries — a bounded FIFO where the oldest is evicted first.
+	Keep = 50
+	// CompactAt is the on-disk length that triggers a compaction. The small
+	// slack over Keep means Append is a cheap O(1) append most of the time
+	// and rewrites the whole file only once every CompactAt-Keep entries,
+	// instead of on every single call. The file never holds more than
+	// CompactAt lines; List hides the slack by clamping to Keep.
+	CompactAt = Keep + 10
 )
 
 // Entry is one transcript.
@@ -76,7 +82,8 @@ func OpenAt(path string) *Store { return &Store{path: path} }
 func (s *Store) Path() string { return s.path }
 
 // Append records a transcript. Empty text is ignored. The file is compacted
-// to the newest Keep entries once it grows past CompactAt.
+// to the newest Keep entries once it grows past CompactAt, so the oldest
+// entries are evicted as new ones arrive.
 func (s *Store) Append(e Entry) error {
 	if e.Text == "" {
 		return nil
@@ -114,9 +121,14 @@ func (s *Store) Last() (Entry, bool) {
 	return all[0], true
 }
 
-// List returns up to n entries, newest first. n <= 0 means all of them. A
-// missing file is an empty history, not an error.
+// List returns up to n entries, newest first. n <= 0 or n > Keep means the
+// newest Keep of them: the store never exposes more than Keep entries, even
+// while the file is carrying the compaction slack. A missing file is an
+// empty history, not an error.
 func (s *Store) List(n int) ([]Entry, error) {
+	if n <= 0 || n > Keep {
+		n = Keep
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	all, err := s.readLocked()
@@ -126,7 +138,7 @@ func (s *Store) List(n int) ([]Entry, error) {
 	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
 		all[i], all[j] = all[j], all[i]
 	}
-	if n > 0 && len(all) > n {
+	if len(all) > n {
 		all = all[:n]
 	}
 	return all, nil
@@ -163,32 +175,43 @@ func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tmp := s.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := s.createTemp()
 	if err != nil {
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		os.Remove(f.Name())
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	return os.Rename(f.Name(), s.path)
+}
+
+// createTemp opens a fresh, uniquely named temp file next to the history
+// file for a rewrite. The name is unique per call rather than a fixed
+// path+".tmp": during a settings reload the outgoing and the incoming daemon
+// briefly run side by side, and with a shared name one's rewrite could
+// truncate or rename away the other's half-written temp, losing transcripts.
+// Same directory keeps the final os.Rename an atomic same-filesystem replace.
+// os.CreateTemp creates the file 0600 (O_EXCL), matching Append's mode.
+func (s *Store) createTemp() (*os.File, error) {
+	return os.CreateTemp(filepath.Dir(s.path), filepath.Base(s.path)+".*.tmp")
 }
 
 // compactLocked rewrites the file with only the newest Keep entries when it
-// has grown past CompactAt. The rewrite goes through a temp file and rename
-// so a crash can never leave a half-written history.
+// has grown past CompactAt. Entries stay oldest-first on disk, the order
+// readLocked and List expect. The rewrite goes through a temp file and
+// rename so a crash can never leave a half-written history.
 func (s *Store) compactLocked() error {
 	all, err := s.readLocked()
 	if err != nil || len(all) <= CompactAt {
 		return err
 	}
 	all = all[len(all)-Keep:]
-	tmp := s.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := s.createTemp()
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	w := bufio.NewWriter(f)
 	enc := json.NewEncoder(w)
 	for _, e := range all {

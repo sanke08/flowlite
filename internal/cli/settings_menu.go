@@ -42,6 +42,7 @@ const (
 	itemModel         menuItem = "model"
 	itemKey           menuItem = "key"
 	itemThreshold     menuItem = "threshold"
+	itemHandsFreeStop menuItem = "handsfree-stop"
 	itemPill          menuItem = "pill"
 	itemMic           menuItem = "mic"
 	itemLang          menuItem = "lang"
@@ -49,6 +50,7 @@ const (
 	itemTestMic       menuItem = "testmic"
 	itemHistory       menuItem = "history"
 	itemHistoryToggle menuItem = "historytoggle"
+	itemUpdateRestart menuItem = "updaterestart"
 	itemDaemon        menuItem = "daemon"
 	itemReset         menuItem = "reset"
 	itemUninstall     menuItem = "uninstall"
@@ -157,6 +159,7 @@ func menuOptions(cfg *config.Config) []huh.Option[menuItem] {
 		huh.NewOption(row("Speech model", model), itemModel),
 		huh.NewOption(row("Dictation key", hotkey.Label(cfg.Hotkey)), itemKey),
 		huh.NewOption(row("Hold threshold", fmt.Sprintf("%d ms", cfg.HoldThresholdMS)), itemThreshold),
+		huh.NewOption(row("Hands-free auto-stop", handsFreeStopValue(cfg)), itemHandsFreeStop),
 		huh.NewOption(row("Pill position", cfg.PillPosition), itemPill),
 		huh.NewOption(row("Microphone", micValue(cfg)), itemMic),
 		huh.NewOption(row("Language", orAuto(cfg.Language)), itemLang),
@@ -164,6 +167,7 @@ func menuOptions(cfg *config.Config) []huh.Option[menuItem] {
 		huh.NewOption(row("Test microphone", "record 4 s, print the transcript"), itemTestMic),
 		huh.NewOption(row("Recent transcripts", historyValue()), itemHistory),
 		huh.NewOption(row("Remember transcripts", onOff(cfg.HistoryEnabled)), itemHistoryToggle),
+		huh.NewOption(row("Restart for updates", onOff(cfg.UpdateRestart)), itemUpdateRestart),
 		huh.NewOption(row("Background daemon", daemonStatus()), itemDaemon),
 		huh.NewOption(row("Reset to defaults", ""), itemReset),
 		huh.NewOption(row("Uninstall FlowLite", ""), itemUninstall),
@@ -208,6 +212,8 @@ func runMenuItem(cfg *config.Config, item menuItem) (menuResult, error) {
 		return asResult(changeKey(cfg))
 	case itemThreshold:
 		return asResult(changeThreshold(cfg))
+	case itemHandsFreeStop:
+		return asResult(changeHandsFreeStop(cfg))
 	case itemPill:
 		return asResult(changePill(cfg))
 	case itemMic:
@@ -222,6 +228,8 @@ func runMenuItem(cfg *config.Config, item menuItem) (menuResult, error) {
 		return resNothing, copyTranscript(cfg)
 	case itemHistoryToggle:
 		return asResult(changeHistoryEnabled(cfg))
+	case itemUpdateRestart:
+		return asResult(changeUpdateRestart(cfg))
 	case itemDaemon:
 		return daemonMenu()
 	case itemReset:
@@ -245,7 +253,7 @@ func save(cfg *config.Config, what, value string) (bool, error) {
 	return true, nil
 }
 
-// ---- rows 1–7: settings ------------------------------------------------------
+// ---- settings rows ------------------------------------------------------
 
 func changeModel(cfg *config.Config) (bool, error) {
 	opts := make([]huh.Option[string], 0, len(catalog.Catalog))
@@ -332,6 +340,47 @@ func changeThreshold(cfg *config.Config) (bool, error) {
 	}
 	cfg.HoldThresholdMS = n
 	return save(cfg, "hold threshold", fmt.Sprintf("%d ms", n))
+}
+
+const maxHandsFreeSilence = 60.0
+
+func handsFreeStopValue(cfg *config.Config) string {
+	if cfg.HandsFreeSilenceSeconds <= 0 {
+		return "off"
+	}
+	return fmt.Sprintf("after %s s of silence", strconv.FormatFloat(cfg.HandsFreeSilenceSeconds, 'f', -1, 64))
+}
+
+func parseHandsFreeSilence(s string) (float64, error) {
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "s"))
+	if strings.EqualFold(s, "off") {
+		return 0, nil
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, errors.New("a number of seconds, like 5.5, or 0 to turn it off")
+	}
+	if n < 0 || n > maxHandsFreeSilence {
+		return 0, fmt.Errorf("between 0 and %.0f", maxHandsFreeSilence)
+	}
+	return n, nil
+}
+
+func changeHandsFreeStop(cfg *config.Config) (bool, error) {
+	val := strconv.FormatFloat(cfg.HandsFreeSilenceSeconds, 'f', -1, 64)
+	if err := huh.NewInput().
+		Title("Hands-free auto-stop (seconds of silence)").
+		Description(fmt.Sprintf("A hands-free recording stops itself after this much silence, as if you had tapped. 0 turns it off; the default %v suits most people. Hold-to-talk is never affected.", config.DefaultHandsFreeSilenceSeconds)).
+		Validate(func(s string) error { _, err := parseHandsFreeSilence(s); return err }).
+		Value(&val).Run(); err != nil {
+		return false, err
+	}
+	n, _ := parseHandsFreeSilence(val)
+	if n == cfg.HandsFreeSilenceSeconds {
+		return false, nil
+	}
+	cfg.HandsFreeSilenceSeconds = n
+	return save(cfg, "hands-free auto-stop", handsFreeStopValue(cfg))
 }
 
 func changePill(cfg *config.Config) (bool, error) {
@@ -496,9 +545,28 @@ func changeHistoryEnabled(cfg *config.Config) (bool, error) {
 	return save(cfg, "remember transcripts", onOff(on))
 }
 
-// ---- rows 9–11: things that are not settings ---------------------------------
+func changeUpdateRestart(cfg *config.Config) (bool, error) {
+	choice := onOff(cfg.UpdateRestart)
+	if err := huh.NewSelect[string]().
+		Title("Restart for updates").
+		Description("Lets `flowlite update` stop the running FlowLite (after any transcription in flight), swap in the new version and start it again. Windows locks a running .exe, so with this Off an update is downloaded but left for you to move into place by hand.").
+		Options(
+			huh.NewOption("On", "on"),
+			huh.NewOption("Off", "off"),
+		).Value(&choice).Run(); err != nil {
+		return false, err
+	}
+	on := choice == "on"
+	if on == cfg.UpdateRestart {
+		return false, nil
+	}
+	cfg.UpdateRestart = on
+	return save(cfg, "restart for updates", onOff(on))
+}
 
-// copyTranscript lists the last ten transcripts and puts the chosen one on
+// ---- rows that are not settings ---------------------------------
+
+// copyTranscript lists the newest transcripts (at most history.Keep) and puts the chosen one on
 // the clipboard. Copy rather than paste: the terminal has focus here, so a
 // paste would land in the wrong place.
 func copyTranscript(cfg *config.Config) error {
@@ -506,7 +574,7 @@ func copyTranscript(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	entries, err := store.List(10)
+	entries, err := store.List(history.Keep)
 	if err != nil {
 		return fmt.Errorf("read history: %w", err)
 	}
@@ -603,9 +671,14 @@ func daemonMenu() (menuResult, error) {
 	case actStart:
 		return resApplied, startBackground()
 	case actStop:
-		return resNothing, stopBackground()
+		// A forced kill still stopped the daemon; stopBackground already
+		// printed the warning line, so that is success here.
+		if err := stopBackground(); err != nil && !errors.Is(err, errForcedStop) {
+			return resNothing, err
+		}
+		return resNothing, nil
 	case actRestart:
-		if err := stopBackground(); err != nil {
+		if err := stopBackground(); err != nil && !errors.Is(err, errForcedStop) {
 			return resNothing, err
 		}
 		return resApplied, startBackground()

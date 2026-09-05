@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -43,3 +44,11 @@ func reexecSelf() error {
 	}
 	return syscall.Exec(exe, os.Args, os.Environ())
 }
+
+// watchStopRequest is a no-op here: SIGTERM already reaches the daemon
+// through signal.NotifyContext. Windows needs a named event instead.
+func watchStopRequest(stop func()) {}
+
+// forceTerminate is not offered on Unix: SIGTERM is always deliverable, so a
+// daemon that ignores it is reported rather than SIGKILLed mid-transcription.
+func forceTerminate(pid int) error { return errors.ErrUnsupported }

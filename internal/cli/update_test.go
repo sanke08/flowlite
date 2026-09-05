@@ -126,7 +126,7 @@ func TestApplyUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := asset{Name: assetName, Size: int64(len(payload)), URL: srv.URL + "/binary"}
-	if err := applyUpdate(context.Background(), target, rel, a); err != nil {
+	if err := applyUpdate(context.Background(), target, rel, a, false); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(target)
@@ -144,7 +144,7 @@ func TestApplyUpdate(t *testing.T) {
 
 	// A size mismatch must leave the old binary untouched and nothing behind.
 	bad := asset{Name: a.Name, Size: a.Size + 5, URL: srv.URL + "/binary"}
-	if err := applyUpdate(context.Background(), target, rel, bad); err == nil {
+	if err := applyUpdate(context.Background(), target, rel, bad, false); err == nil {
 		t.Fatal("size mismatch should fail")
 	}
 	got, _ = os.ReadFile(target)
@@ -162,7 +162,7 @@ func TestApplyUpdate(t *testing.T) {
 		{Name: checksumAssetName, URL: srv.URL + "/sums"},
 	}}
 	missing := asset{Name: "flowlite-v9.9.9-macos-x64", Size: a.Size, URL: srv.URL + "/binary"}
-	if err := applyUpdate(context.Background(), target, relNoSum, missing); err == nil {
+	if err := applyUpdate(context.Background(), target, relNoSum, missing, false); err == nil {
 		t.Fatal("missing checksum entry should fail")
 	}
 	got, _ = os.ReadFile(target)
@@ -172,7 +172,7 @@ func TestApplyUpdate(t *testing.T) {
 
 	// A release that never published SHA256SUMS at all must also fail.
 	relNoAsset := &release{TagName: "v9.9.9"}
-	if err := applyUpdate(context.Background(), target, relNoAsset, a); err == nil {
+	if err := applyUpdate(context.Background(), target, relNoAsset, a, false); err == nil {
 		t.Fatal("release without SHA256SUMS should fail")
 	}
 
@@ -182,7 +182,7 @@ func TestApplyUpdate(t *testing.T) {
 	relBadSum := &release{TagName: "v9.9.9", Assets: []asset{
 		{Name: checksumAssetName, URL: srv.URL + "/sums-bad"},
 	}}
-	if err := applyUpdate(context.Background(), target, relBadSum, a); err == nil {
+	if err := applyUpdate(context.Background(), target, relBadSum, a, false); err == nil {
 		t.Fatal("checksum mismatch should fail")
 	}
 	got, _ = os.ReadFile(target)

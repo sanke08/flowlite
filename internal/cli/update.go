@@ -308,17 +308,41 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Updating %s → %s\n", dim(Version), bold(rel.TagName))
 	fmt.Println(dim("  " + target))
-	if err := applyUpdate(ctx, target, rel, a); err != nil {
+	restart := restartForUpdate()
+	if err := applyUpdate(ctx, target, rel, a, restart); err != nil {
 		if ctx.Err() != nil {
 			return errors.New("interrupted — nothing was changed")
 		}
 		return err
 	}
 	fmt.Printf("%s updated %s → %s\n", ok("✓"), Version, rel.TagName)
+	if restart {
+		return nil // applyUpdate already brought the new version up
+	}
 	if err := applyToRunningDaemon("the new version"); err != nil {
 		return err
 	}
 	return nil
+}
+
+// restartForUpdate reports whether applyUpdate should stop the running
+// daemon before swapping the binary and start it again after. Only Windows
+// needs this: it locks a running .exe against replacement, where Unix lets
+// the old inode live on under the running process. The user can turn it off
+// (settings → Restart for updates) and move the file into place by hand.
+func restartForUpdate() bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	cfg, err := loadConfig()
+	if err != nil || !cfg.UpdateRestart {
+		return false
+	}
+	_, running := daemonRunning()
+	// A foreground `--no-paste` daemon lives in someone's terminal; stopping
+	// it and respawning a detached one would silently change its mode.
+	// Leave it alone and let the manual step apply.
+	return running && !daemonIsForeground()
 }
 
 // checkWritable fails early, before any download, when the target's
@@ -341,7 +365,13 @@ func checkWritable(target string) error {
 // against the release's published SHA256SUMS, and swaps it in. The temp file
 // lives in the same directory so the final rename is a single atomic step:
 // at no point is there a half-written flowlite on PATH.
-func applyUpdate(ctx context.Context, target string, rel *release, a asset) error {
+//
+// restartDaemon (Windows, see restartForUpdate) stops the running daemon
+// gracefully just before the swap — after the download and checksum, so the
+// daemon is down only for the rename itself — and starts it again afterwards,
+// whether or not the swap succeeded, so a failed update never leaves FlowLite
+// off.
+func applyUpdate(ctx context.Context, target string, rel *release, a asset, restartDaemon bool) error {
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".flowlite-update-*")
 	if err != nil {
@@ -399,11 +429,33 @@ func applyUpdate(ctx context.Context, target string, rel *release, a asset) erro
 			return err
 		}
 	}
-	if err := replaceBinary(tmpPath, target); err != nil {
-		cleanup()
-		return err
+	if restartDaemon {
+		fmt.Println(dim("  stopping FlowLite to replace the binary…"))
+		if err := stopBackground(); err != nil {
+			cleanup()
+			if errors.Is(err, errForcedStop) {
+				// The daemon had to be killed, most likely mid-transcription.
+				// Do not compound that by swapping the binary underneath a
+				// state we did not see end cleanly: bring FlowLite back on
+				// the current version and let the user retry when idle.
+				if err2 := startBackground(); err2 != nil {
+					return fmt.Errorf("FlowLite did not stop cleanly and was killed (a transcription in flight was likely lost); the update was not applied, and restarting the old version failed: %w", err2)
+				}
+				return errors.New("FlowLite did not stop cleanly and was killed — a transcription in flight was likely lost. The update was not applied and the previous version is running again; retry `flowlite update` when FlowLite is idle")
+			}
+			return fmt.Errorf("could not stop the running FlowLite: %w — nothing was changed", err)
+		}
 	}
-	return nil
+	replaceErr := replaceBinary(tmpPath, target)
+	if replaceErr != nil {
+		cleanup()
+	}
+	if restartDaemon {
+		if err := startBackground(); err != nil {
+			return errors.Join(replaceErr, err)
+		}
+	}
+	return replaceErr
 }
 
 // downloadTo streams the asset into f with a progress bar, refuses anything
