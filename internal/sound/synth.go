@@ -13,7 +13,11 @@ package sound
 
 import "math"
 
-const Rate = 44_100
+// Rate is the sample rate cues are rendered and played at. 48 kHz because
+// that is what the built-in speakers (and nearly every modern Mac output)
+// actually run at: matching it means miniaudio hands our buffers straight to
+// CoreAudio instead of resampling 44.1k→48k inside the real-time callback.
+const Rate = 48_000
 
 // Cue is one of the app's audio signals.
 type Cue int
@@ -356,17 +360,20 @@ var designs = [6]design{
 		},
 		master: master{cutoff: 3800, drive: 1.4, wet: 0.32, rt60: 0.11, peak: 0.38},
 	},
-	// Working — Apple's Tock.caf, reverse-engineered: base freq ~900 Hz so
-	// the tick's ratios land on the ~1.8-3.6 kHz cluster measured from the
-	// real file, full ~22 ms length to fit hit + tail, near-instant attack
-	// (the real file's own attack is under 0.5 ms) but no drive/glide/
-	// reverb — those would turn the click into a tone.
+	// Working — a mechanical clock ticker. Two layers: the escapement click
+	// (broadband tick partials at ~1.8 kHz, sub-millisecond attack) and a
+	// short woody knock underneath (~620 Hz, mallet body, 14 ms) that gives
+	// each tick the body of a real clock rather than a bare digital click.
+	// Louder than the other cues' relative level would suggest because it
+	// is short and repeats; no drive/glide/reverb, which would turn it into
+	// a tone.
 	Working: {
-		length: 0.022,
+		length: 0.030,
 		voices: []note{
-			{freq: 900, at: 0, dur: 0.021, amp: 1, partials: tick, attack: 0.0009, release: 0.003},
+			{freq: 1800, at: 0, dur: 0.012, amp: 1.0, partials: tick, attack: 0.0006, release: 0.003},
+			{freq: 620, at: 0, dur: 0.016, amp: 0.7, partials: mallet, attack: 0.0008, release: 0.006, decay: 0.12},
 		},
-		master: master{cutoff: 4800, drive: 0, peak: 0.18},
+		master: master{cutoff: 6500, drive: 0, peak: 0.22},
 	},
 	// Done — the sparkle (A5 → D6, chime timbre, shimmering detuned third
 	// partial) stays, but now sits on the same low boom + sustained pad

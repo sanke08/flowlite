@@ -196,10 +196,14 @@ func startBackground() error {
 	if err := c.Start(); err != nil {
 		return err
 	}
-	// Give the model a moment to load so a failure shows up here.
+	// Give the model a moment to load so a failure shows up here. 15s: the
+	// same budget stopBackground and waitForReload give — this is the same
+	// daemon.New a cold start runs, which on a first run can block on the
+	// macOS microphone-permission dialog and then a model load plus warm-up
+	// (the README documents 15+ seconds for that alone).
 	spin := startSpinner("starting…")
 	defer spin.Stop()
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 150; i++ {
 		time.Sleep(100 * time.Millisecond)
 		if _, running := daemonRunning(); running {
 			spin.Stop()

@@ -6,6 +6,7 @@ package overlay
 import (
 	"strings"
 	"sync"
+	"time"
 )
 
 // State selects the pill's appearance.
@@ -70,3 +71,28 @@ func positionCode(pos string) int {
 	}
 	return -1
 }
+
+// HistoryEntry is one row the history panel can show.
+type HistoryEntry struct {
+	Time time.Time
+	Text string
+}
+
+// ShowHistory morphs the pill into a scrollable list of past transcripts.
+// onPick is called (on some internal thread — callers must not assume any
+// particular goroutine) with the index of a row the user clicked; onClose is
+// called when the panel closes for any reason (Escape, a click outside it,
+// or ShowHistory/HideHistory being called again) so the caller can update
+// its own bookkeeping. Calling ShowHistory again while already open replaces
+// the list and callbacks in place, it does not toggle closed — HideHistory
+// is what closes it.
+func ShowHistory(entries []HistoryEntry, onPick func(index int), onClose func()) {
+	showHistory(entries, onPick, onClose)
+}
+
+// HideHistory morphs the panel back down to the plain pill (or fully hides
+// if nothing else wants it shown).
+func HideHistory() { hideHistory() }
+
+// IsHistoryOpen reports whether the history panel is currently showing.
+func IsHistoryOpen() bool { return isHistoryOpen() }

@@ -13,12 +13,15 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 echo "FlowLite: finding the latest release…"
-URL=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"browser_download_url"' | grep "$ASSET" | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
+RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
+URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep "$ASSET" | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
 [ -n "$URL" ] || { echo "no release asset found for $ASSET"; exit 1; }
+SUMS_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep "SHA256SUMS" | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
+[ -n "$SUMS_URL" ] || { echo "FlowLite: release has no SHA256SUMS — refusing to install an unverified binary"; exit 1; }
+ASSET_NAME=$(basename "$URL")
 
 TMP=$(mktemp -t flowlite)
-echo "FlowLite: downloading $(basename "$URL")…"
+echo "FlowLite: downloading $ASSET_NAME…"
 
 # curl's own progress bar degrades to a bouncing marker when it cannot work
 # out the total size, which reads as broken. Download silently in the
@@ -58,6 +61,28 @@ FINAL=$(file_size "$TMP")
 [ "$TOTAL" -gt 0 ] || TOTAL=$FINAL
 progress "$FINAL" "$TOTAL"
 printf '\n' >&2
+
+echo "FlowLite: verifying checksum…"
+SUMS_TMP=$(mktemp -t flowlite-sums)
+if ! curl -fsSL "$SUMS_URL" -o "$SUMS_TMP"; then
+  echo "FlowLite: failed to download SHA256SUMS — refusing to install an unverified binary" >&2
+  rm -f "$TMP" "$SUMS_TMP"
+  exit 1
+fi
+SUMS_LINE=$(grep -F "  $ASSET_NAME" "$SUMS_TMP" | head -1)
+if [ -z "$SUMS_LINE" ]; then
+  echo "FlowLite: SHA256SUMS has no entry for $ASSET_NAME — refusing to install an unverified binary" >&2
+  rm -f "$TMP" "$SUMS_TMP"
+  exit 1
+fi
+EXPECTED_HASH=$(echo "$SUMS_LINE" | awk '{print $1}')
+rm -f "$SUMS_TMP"
+if ! echo "$EXPECTED_HASH  $TMP" | shasum -a 256 -c - >/dev/null 2>&1; then
+  echo "FlowLite: checksum verification failed for $ASSET_NAME — the download is corrupt or was tampered with" >&2
+  rm -f "$TMP"
+  exit 1
+fi
+
 chmod +x "$TMP"
 
 # Put the binary where the terminal will find it: Homebrew's bin (already on

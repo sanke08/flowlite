@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,26 +97,36 @@ func TestCheckCacheRoundTrip(t *testing.T) {
 	}
 }
 
-// TestApplyUpdate exercises the download → verify → rename path against a
-// local server, using a shell script as the "binary" so the sanity check
-// (which runs `<file> --version`) has something real to execute.
+// TestApplyUpdate exercises the download → verify checksum → verify size →
+// sanity-check → rename path against a local server, using a shell script as
+// the "binary" so the sanity check (which runs `<file> --version`) has
+// something real to execute.
 func TestApplyUpdate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a shell script as the fake binary")
 	}
 	payload := []byte("#!/bin/sh\necho flowlite v9.9.9\n")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(payload)
-	}))
+	assetName := "flowlite-v9.9.9-macos-arm64"
+	sum := sha256.Sum256(payload)
+	sums := hex.EncodeToString(sum[:]) + "  " + assetName + "\n"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { w.Write(payload) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(sums)) })
+	srv := httptest.NewServer(mux)
 	defer srv.Close()
+
+	rel := &release{TagName: "v9.9.9", Assets: []asset{
+		{Name: checksumAssetName, URL: srv.URL + "/sums"},
+	}}
 
 	dir := t.TempDir()
 	target := filepath.Join(dir, "flowlite")
 	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a := asset{Name: "flowlite-v9.9.9-macos-arm64", Size: int64(len(payload)), URL: srv.URL}
-	if err := applyUpdate(context.Background(), target, a); err != nil {
+	a := asset{Name: assetName, Size: int64(len(payload)), URL: srv.URL + "/binary"}
+	if err := applyUpdate(context.Background(), target, rel, a); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(target)
@@ -131,8 +143,8 @@ func TestApplyUpdate(t *testing.T) {
 	}
 
 	// A size mismatch must leave the old binary untouched and nothing behind.
-	bad := asset{Name: a.Name, Size: a.Size + 5, URL: srv.URL}
-	if err := applyUpdate(context.Background(), target, bad); err == nil {
+	bad := asset{Name: a.Name, Size: a.Size + 5, URL: srv.URL + "/binary"}
+	if err := applyUpdate(context.Background(), target, rel, bad); err == nil {
 		t.Fatal("size mismatch should fail")
 	}
 	got, _ = os.ReadFile(target)
@@ -142,6 +154,44 @@ func TestApplyUpdate(t *testing.T) {
 	entries, _ = os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("temp files left behind after failure: %v", entries)
+	}
+
+	// A release with no SHA256SUMS entry for this asset must fail before any
+	// download-time damage, not silently install unverified.
+	relNoSum := &release{TagName: "v9.9.9", Assets: []asset{
+		{Name: checksumAssetName, URL: srv.URL + "/sums"},
+	}}
+	missing := asset{Name: "flowlite-v9.9.9-macos-x64", Size: a.Size, URL: srv.URL + "/binary"}
+	if err := applyUpdate(context.Background(), target, relNoSum, missing); err == nil {
+		t.Fatal("missing checksum entry should fail")
+	}
+	got, _ = os.ReadFile(target)
+	if string(got) != string(payload) {
+		t.Fatal("target changed after checksum-entry-missing failure")
+	}
+
+	// A release that never published SHA256SUMS at all must also fail.
+	relNoAsset := &release{TagName: "v9.9.9"}
+	if err := applyUpdate(context.Background(), target, relNoAsset, a); err == nil {
+		t.Fatal("release without SHA256SUMS should fail")
+	}
+
+	// A checksum that does not match the downloaded bytes must fail.
+	tamperedSums := hex.EncodeToString(sha256.New().Sum(nil)) + "  " + assetName + "\n"
+	mux.HandleFunc("/sums-bad", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(tamperedSums)) })
+	relBadSum := &release{TagName: "v9.9.9", Assets: []asset{
+		{Name: checksumAssetName, URL: srv.URL + "/sums-bad"},
+	}}
+	if err := applyUpdate(context.Background(), target, relBadSum, a); err == nil {
+		t.Fatal("checksum mismatch should fail")
+	}
+	got, _ = os.ReadFile(target)
+	if string(got) != string(payload) {
+		t.Fatal("target changed after checksum-mismatch failure")
+	}
+	entries, _ = os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("temp files left behind after checksum-mismatch failure: %v", entries)
 	}
 }
 

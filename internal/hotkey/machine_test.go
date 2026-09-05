@@ -39,7 +39,7 @@ func tick(m *Machine, c *clock, d time.Duration) []Event {
 	var evs []Event
 	for elapsed := time.Duration(0); elapsed < d; elapsed += 50 * time.Millisecond {
 		c.advance(50 * time.Millisecond)
-		if e := m.Expire(); e != None {
+		if e := m.Expire(false); e != None {
 			evs = append(evs, e)
 		}
 	}
@@ -375,5 +375,66 @@ func TestResetWhileHeldForgetsTheKey(t *testing.T) {
 	tick(m, c, hold+50*time.Millisecond)
 	m.Reset() // max duration reached mid-hold
 	expect(t, "release after reset", m.Release(Target), None)
+	expectState(t, m, Idle)
+}
+
+// tickMod is like tick but calls Expire(modifierHeld) instead of always
+// Expire(false), for exercising the history-chord gesture.
+func tickMod(m *Machine, c *clock, d time.Duration, modifierHeld bool) []Event {
+	var evs []Event
+	for elapsed := time.Duration(0); elapsed < d; elapsed += 50 * time.Millisecond {
+		c.advance(50 * time.Millisecond)
+		if e := m.Expire(modifierHeld); e != None {
+			evs = append(evs, e)
+		}
+	}
+	return evs
+}
+
+func TestHoldWithModifierOpensHistory(t *testing.T) {
+	m, c := newMachine()
+	expect(t, "press", m.Press(Target), Start)
+	expectState(t, m, Undecided)
+	got := tickMod(m, c, hold+50*time.Millisecond, true)
+	if !equal(got, []Event{ShowHistory}) {
+		t.Fatalf("ticks while holding with modifier = %v, want [show-history]", got)
+	}
+	expectState(t, m, HistoryHeld)
+	expect(t, "release", m.Release(Target), None)
+	expectState(t, m, Idle)
+}
+
+func TestHoldWithoutModifierStillConfirmsHold(t *testing.T) {
+	// Regression guard: passing false at the threshold must behave exactly as
+	// before the chord gesture was added.
+	m, c := newMachine()
+	expect(t, "press", m.Press(Target), Start)
+	got := tickMod(m, c, hold+50*time.Millisecond, false)
+	if !equal(got, []Event{HoldConfirmed}) {
+		t.Fatalf("ticks while holding without modifier = %v, want [hold-confirmed]", got)
+	}
+	expectState(t, m, Holding)
+	expect(t, "release", m.Release(Target), Finish)
+	expectState(t, m, Idle)
+}
+
+func TestModifierAfterHoldConfirmedDoesNotRetroactivelyChangeIt(t *testing.T) {
+	// Once Holding is entered with modifierHeld==false at the threshold, a
+	// later Expire(true) must not turn it into history: Expire's switch only
+	// inspects modifierHeld inside the Undecided case, and Holding is not one
+	// of the cases the switch handles at all, so it is a no-op here.
+	m, c := newMachine()
+	m.Press(Target)
+	got := tickMod(m, c, hold+50*time.Millisecond, false)
+	if !equal(got, []Event{HoldConfirmed}) {
+		t.Fatalf("ticks while holding = %v, want [hold-confirmed]", got)
+	}
+	expectState(t, m, Holding)
+	// The modifier flips on late, well after the hold was already confirmed.
+	if evs := tickMod(m, c, 500*time.Millisecond, true); len(evs) != 0 {
+		t.Fatalf("expire(true) after hold confirmed = %v, want nothing", evs)
+	}
+	expectState(t, m, Holding)
+	expect(t, "release", m.Release(Target), Finish)
 	expectState(t, m, Idle)
 }

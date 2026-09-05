@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,7 @@ type Daemon struct {
 	player  *sound.Player
 	machine *hotkey.Machine
 	events  chan hotkey.KeyEvent
+	micErr  chan uint64 // recGen of a start() whose microphone failed to open
 	tap     *hotkey.Tap
 	hist    *history.Store // nil when the history file cannot be opened
 
@@ -103,7 +105,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 
 	m, ok := catalog.Get(cfg.Model)
 	if !ok || !m.Downloaded() {
-		return nil, errors.New("no model installed — run `flowlite setup`")
+		return nil, errors.New("no model installed — run `flowlite` to set one up")
 	}
 	path, err := m.Path()
 	if err != nil {
@@ -127,10 +129,19 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 	}
 	logger.Printf("model %s ready on %s in %s", m.Label, dev, time.Since(t0).Round(time.Millisecond))
 
+	// Open the microphone (stopped) before the sound Player opens its output
+	// stream: see audio.Recorder for why the capture unit's first open must
+	// not happen while an output stream is live on the same device.
+	rec := audio.NewRecorder(cfg.InputDevice, cfg.MaxSeconds)
+	if err := rec.Prepare(); err != nil {
+		logger.Printf("microphone: %v (will retry on first use)", err)
+	}
+
 	player, err := sound.NewPlayer(cfg.Sounds)
 	if err != nil {
 		logger.Printf("sounds disabled: %v", err)
 	}
+	player.SetLogger(logger.Printf)
 
 	hist, err := history.Open()
 	if err != nil {
@@ -144,10 +155,11 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 		cfg:     cfg,
 		log:     logger,
 		model:   model,
-		rec:     audio.NewRecorder(cfg.InputDevice, cfg.MaxSeconds),
+		rec:     rec,
 		player:  player,
 		machine: hotkey.New(time.Duration(cfg.HoldThresholdMS) * time.Millisecond),
 		events:  make(chan hotkey.KeyEvent, 64),
+		micErr:  make(chan uint64, 4),
 		hist:    hist,
 	}
 	mainloop.OnWake(d.wake)
@@ -185,6 +197,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		case ev := <-d.events:
 			d.handle(ev)
+		case gen := <-d.micErr:
+			d.micFailed(gen)
 		case <-tick.C:
 			d.tick()
 		}
@@ -204,7 +218,7 @@ func (d *Daemon) Close() {
 	// Tell a transcription in flight to stop short of pasting. The user has
 	// quit; dropping text into whatever window they switch to a second later
 	// is worse than not pasting at all. It is still written to history, so a
-	// triple tap or `flowlite last` gets it back.
+	// triple tap, or `flowlite settings` → "Recent transcripts", gets it back.
 	d.closing.Store(true)
 	// Then wait for it, so whisper_free never lands under a running
 	// whisper_full. Model.Close would block on its own lock anyway; taking
@@ -212,9 +226,19 @@ func (d *Daemon) Close() {
 	d.busy.Lock()
 	d.model.Close()
 	d.busy.Unlock()
+	// busy coming free means any transcribe()/pasteLastNow() that was in
+	// flight has fully returned — which means its inject.Paste call has
+	// already queued a clipboard restore as a background goroutine (Paste no
+	// longer blocks on that wait; see inject.go), but that goroutine may
+	// still be mid-sleep. Give it a bounded chance to finish before sounds
+	// and the pill go away and the process exits, or shutdown could leave
+	// the transcript on the clipboard instead of whatever the user had
+	// copied before dictating.
+	inject.WaitPending(inject.RestoreDelay + 200*time.Millisecond)
 	// Sounds and the pill go last: transcribe reaches for both on its way out,
 	// and closing them first is a race against a goroutine we just waited for.
 	d.player.Close()
+	d.rec.Close()
 	overlay.Hide()
 }
 
@@ -237,10 +261,21 @@ func (d *Daemon) State() State { return d.getState() }
 
 // ---- gestures -----------------------------------------------------------
 
+// modifierHeld reports whether the history-panel chord's modifier is
+// currently down. Meaningless (and forced false) when the dictation hotkey
+// itself is Right Shift, since then "modifier held" would just mirror the
+// hotkey's own down-state and every hold would misfire as history.
+func (d *Daemon) modifierHeld() bool {
+	if d.cfg.Hotkey == "shift_r" {
+		return false
+	}
+	return hotkey.ModifierHeld()
+}
+
 func (d *Daemon) handle(ev hotkey.KeyEvent) {
 	// Let time settle any pending gesture first so a press is judged
 	// against an up-to-date machine (a tick may be up to 50 ms late).
-	d.act(d.machine.Expire())
+	d.act(d.machine.Expire(d.modifierHeld()))
 	if ev.Down {
 		d.act(d.machine.Press(ev.Kind))
 	} else {
@@ -262,6 +297,8 @@ func (d *Daemon) act(e hotkey.Event) {
 		d.discard()
 	case hotkey.Cancel:
 		d.cancel()
+	case hotkey.ShowHistory:
+		d.toggleHistory()
 	}
 }
 
@@ -293,7 +330,13 @@ func (d *Daemon) start() {
 	go func() {
 		if err := d.rec.Start(); err != nil {
 			d.log.Printf("microphone: %v", err)
-			d.micFailed(gen)
+			// micFailed touches d.machine, which is documented as driven only
+			// by the event-loop goroutine (see hotkey.Machine); hand off
+			// through micErr instead of calling it from here directly.
+			select {
+			case d.micErr <- gen:
+			default: // event loop is behind; dropping is safer than blocking
+			}
 		}
 	}()
 }
@@ -396,10 +439,13 @@ func (d *Daemon) pasteLast() {
 		d.setState(Idle)
 		return
 	}
-	// inject.Paste blocks: ~50ms before the keystroke so the OS registers the
-	// new clipboard owner, and up to 600ms after restoring the old clipboard
-	// contents. Running that here would stall the daemon's whole event loop
-	// — no key events processed, no ticks — for as long as it takes, so the
+	// inject.Paste still blocks synchronously for ~50ms before the keystroke,
+	// so the OS registers the new clipboard owner, plus the keystroke and
+	// clipboard set themselves — the up-to-600ms clipboard restore that used
+	// to follow now runs in its own background goroutine (see inject.go) and
+	// no longer costs Paste's caller anything. Running even that shorter,
+	// still-blocking part here would stall the daemon's whole event loop —
+	// no key events processed, no ticks — for as long as it takes, so the
 	// next hold-to-talk would only register once this triple tap's paste
 	// finally finishes.
 	go d.pasteLastNow(last)
@@ -422,7 +468,10 @@ func (d *Daemon) pasteLastNow(last history.Entry) {
 	if d.NoPaste {
 		label = "Last transcript"
 		if d.Transcribed != nil {
-			d.Transcribed(last.Text, last.AudioSeconds, 0)
+			// last is a history.Entry read back from storage, which no longer
+			// tracks how long the original recording was — pass 0 rather than
+			// pretending we still know.
+			d.Transcribed(last.Text, 0, 0)
 		}
 	} else if err := inject.Paste(last.Text, d.cfg.RestoreClipboard); err != nil {
 		d.log.Printf("paste failed: %v", err)
@@ -451,12 +500,7 @@ func (d *Daemon) transcribe(samples []float32) {
 		// has focus now, and do not raise the pill after it has been hidden.
 		if err == nil {
 			if text := speech.Finalise(segs); text != "" {
-				d.remember(history.Entry{
-					Time:         time.Now(),
-					Text:         text,
-					Pasted:       false,
-					AudioSeconds: float64(len(samples)) / audio.SampleRate,
-				})
+				d.remember(history.Entry{Time: time.Now(), Text: text})
 				d.log.Printf("shutting down: %d chars kept in history, not pasted", len(text))
 			}
 		}
@@ -476,16 +520,15 @@ func (d *Daemon) transcribe(samples []float32) {
 	secs := float64(len(samples)) / audio.SampleRate
 
 	label := "Pasted"
-	pasted := false
 	var pasteErr error
 	if d.NoPaste {
 		label = "Transcribed"
-	} else if pasteErr = inject.Paste(text, d.cfg.RestoreClipboard); pasteErr == nil {
-		pasted = true
+	} else {
+		pasteErr = inject.Paste(text, d.cfg.RestoreClipboard)
 	}
-	// Every transcript is remembered, pasted or not, so a triple tap or
-	// `flowlite last` can recover it.
-	d.remember(history.Entry{Time: time.Now(), Text: text, Pasted: pasted, AudioSeconds: secs})
+	// Every transcript is remembered, pasted or not, so a triple tap, or
+	// `flowlite settings` → "Recent transcripts", can recover it.
+	d.remember(history.Entry{Time: time.Now(), Text: text})
 	if pasteErr != nil {
 		d.log.Printf("paste failed: %v", pasteErr)
 		d.settle(overlay.Error, "Paste failed", sound.Error, holdError)
@@ -508,7 +551,7 @@ func (d *Daemon) settle(s overlay.State, text string, cue sound.Cue, hold time.D
 }
 
 func (d *Daemon) remember(e history.Entry) {
-	if d.hist == nil {
+	if d.hist == nil || !d.cfg.HistoryEnabled {
 		return
 	}
 	if err := d.hist.Append(e); err != nil {
@@ -532,10 +575,77 @@ func (d *Daemon) hideAfter(delay time.Duration) {
 	})
 }
 
+// toggleHistory handles the hold+Shift chord: the silent recording start()
+// always begins on key-down is not what the user wanted here, so it must be
+// cancelled the same way discard() cancels an unconfirmed one. It then opens
+// (or, if already open, closes) the history panel — reachable only from
+// Idle, so none of the pill's own gen/pillUp bookkeeping is involved.
+func (d *Daemon) toggleHistory() {
+	if d.getState() == Recording {
+		d.rec.Cancel()
+	}
+	d.setState(Idle)
+
+	if overlay.IsHistoryOpen() {
+		overlay.HideHistory()
+		return
+	}
+	if d.hist == nil {
+		d.show(overlay.Error, "History unavailable")
+		d.player.Play(sound.Error)
+		d.hideAfter(holdError)
+		return
+	}
+	// Note: d.cfg.HistoryEnabled gates whether remember() writes NEW entries
+	// — it says nothing about whether existing history can be browsed, so it
+	// is deliberately not checked here.
+	entries, err := d.hist.List(50)
+	if err != nil || len(entries) == 0 {
+		d.show(overlay.Error, "No transcripts yet")
+		d.player.Play(sound.Error)
+		d.hideAfter(holdError)
+		return
+	}
+	rows := make([]overlay.HistoryEntry, len(entries))
+	for i, e := range entries {
+		rows[i] = overlay.HistoryEntry{
+			Time: e.Time,
+			Text: historyPreviewText(e.Text),
+		}
+	}
+	overlay.ShowHistory(rows, func(i int) {
+		if i < 0 || i >= len(entries) {
+			return
+		}
+		go d.pasteLastNow(entries[i])
+	}, func() {})
+}
+
+// historyPreviewText collapses a transcript onto one clean logical line —
+// folding embedded newlines and repeated whitespace from a dictated
+// transcript down to single spaces — but no longer truncates it. The
+// history-panel row now wraps onto multiple lines instead of the single
+// non-wrapping line it used to be (see overlay_darwin.m's FLHistoryDataSource,
+// whose preview NSTextField already caps visible height at
+// HIST_ROW_MAXLINES with word-wrap and tail-truncation), so cutting the text
+// here at a fixed rune count would just hide words that Cocoa has plenty of
+// room to show. The full collapsed text is passed through; the wrapping,
+// multi-line NSTextField's native ellipsis is now the only place a transcript
+// is ever visually truncated.
+//
+// This mirrors settings_menu.go's oneLine helper but is duplicated rather
+// than imported: internal/cli's oneLine is unexported, and internal/daemon
+// has no business importing the CLI package for one small formatting helper.
+// copyTranscript's own 60-rune cap for its CLI listing is unrelated and
+// untouched by this.
+func historyPreviewText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func (d *Daemon) tick() {
 	// Time is what tells a tap from a hold and a lone tap from the start
 	// of a double-tap; the machine finds out here.
-	d.act(d.machine.Expire())
+	d.act(d.machine.Expire(d.modifierHeld()))
 	if d.getState() != Recording {
 		return
 	}

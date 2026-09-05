@@ -25,8 +25,9 @@ type Config struct {
 	InputDevice      string `json:"input_device"`      // device name; "" = default
 	RestoreClipboard bool   `json:"restore_clipboard"`
 	Sounds           bool   `json:"sounds"`
-	MaxSeconds       int    `json:"max_seconds"`   // hard stop for a forgotten toggle
-	PillPosition     string `json:"pill_position"` // screen edge the pill sits on: bottom, top, left, right
+	MaxSeconds       int    `json:"max_seconds"`     // hard stop for a forgotten toggle
+	PillPosition     string `json:"pill_position"`   // screen edge the pill sits on: bottom, top, left, right
+	HistoryEnabled   bool   `json:"history_enabled"` // whether transcripts are remembered at all
 }
 
 // Default is a fresh, unconfigured settings object.
@@ -38,6 +39,7 @@ func Default() *Config {
 		Sounds:           true,
 		MaxSeconds:       300,
 		PillPosition:     "bottom",
+		HistoryEnabled:   true,
 	}
 }
 

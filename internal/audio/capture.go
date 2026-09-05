@@ -25,6 +25,20 @@ type Device struct {
 }
 
 // Recorder records to memory until stopped. One recording at a time.
+//
+// The capture device is opened once and kept, stopped, between recordings;
+// Start and Stop only start and stop its IO. Rebuilding it per recording
+// (the previous design) was not just slow — it broke the sound cues. On
+// macOS the capture AudioUnit that miniaudio creates attaches to the
+// default *output* device first, creates an IO proc on it, then tears that
+// down and tells coreaudiod the speaker session is "Stopped" before it is
+// pointed at the microphone. That happened underneath the sound Player's
+// live output stream on the very same device, on every key-down: cues came
+// out stuttering or not at all, while the Player's own callback kept
+// running on time and saw nothing wrong. Opening the unit once — before the
+// Player opens its stream (see daemon.New) — takes that out of the per-
+// dictation path entirely. A stopped unit does not run IO, so the mic
+// indicator behaves exactly as before: on while recording, off otherwise.
 type Recorder struct {
 	deviceName string
 	maxSamples int
@@ -32,6 +46,7 @@ type Recorder struct {
 	mu       sync.Mutex
 	ctx      *malgo.AllocatedContext
 	dev      *malgo.Device
+	running  bool // IO started on dev
 	buf      []float32
 	level    float64
 	overflow bool
@@ -85,11 +100,11 @@ func DefaultDeviceName() string {
 	return ""
 }
 
-// Recording reports whether a stream is open.
+// Recording reports whether the microphone is currently capturing.
 func (r *Recorder) Recording() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.dev != nil
+	return r.running
 }
 
 // Level is the most recent smoothed RMS, 0–1, for a live meter.
@@ -136,10 +151,18 @@ func (r *Recorder) onData(_ []byte, in []byte, frames uint32) {
 	r.mu.Unlock()
 }
 
-// Start opens the microphone.
-func (r *Recorder) Start() error {
+// Prepare opens the capture device without starting it, so the first
+// key-down pays only for Start, and so the one-time speaker-side detour
+// described on Recorder happens now, before any output stream exists.
+// Errors are not fatal: Start will simply try again.
+func (r *Recorder) Prepare() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.openLocked()
+}
+
+// openLocked initialises ctx/dev if they are not already. Caller holds r.mu.
+func (r *Recorder) openLocked() error {
 	if r.dev != nil {
 		return nil
 	}
@@ -173,33 +196,65 @@ func (r *Recorder) Start() error {
 		ctx.Free()
 		return fmt.Errorf("open microphone: %w", err)
 	}
-	r.buf = r.buf[:0]
-	r.level = 0
-	r.overflow = false
-	if err := dev.Start(); err != nil {
-		dev.Uninit()
-		_ = ctx.Uninit()
-		ctx.Free()
-		return fmt.Errorf("start microphone: %w", err)
-	}
 	r.ctx, r.dev = ctx, dev
 	return nil
 }
 
-// Stop closes the microphone and returns everything captured.
+// closeLocked releases ctx/dev. Caller holds r.mu.
+func (r *Recorder) closeLocked() {
+	if r.dev != nil {
+		if r.running {
+			_ = r.dev.Stop()
+		}
+		r.dev.Uninit()
+	}
+	if r.ctx != nil {
+		_ = r.ctx.Uninit()
+		r.ctx.Free()
+	}
+	r.dev, r.ctx, r.running = nil, nil, false
+}
+
+// Start begins capturing. The device is opened on first use (or if a
+// previous one was lost) and then reused.
+func (r *Recorder) Start() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running {
+		return nil
+	}
+	if err := r.openLocked(); err != nil {
+		return err
+	}
+	r.buf = r.buf[:0]
+	r.level = 0
+	r.overflow = false
+	if err := r.dev.Start(); err != nil {
+		// The device we were holding may be gone (unplugged, or the system
+		// default changed underneath a named device). Rebuild once.
+		r.closeLocked()
+		if err2 := r.openLocked(); err2 != nil {
+			return fmt.Errorf("start microphone: %w", err)
+		}
+		if err2 := r.dev.Start(); err2 != nil {
+			r.closeLocked()
+			return fmt.Errorf("start microphone: %w", err2)
+		}
+	}
+	r.running = true
+	return nil
+}
+
+// Stop ends capturing and returns everything captured. The device stays
+// open, stopped, for the next Start.
 func (r *Recorder) Stop() []float32 {
 	r.mu.Lock()
-	dev, ctx := r.dev, r.ctx
-	r.dev, r.ctx = nil, nil
+	dev, running := r.dev, r.running
+	r.running = false
 	r.mu.Unlock()
 
-	if dev != nil {
+	if dev != nil && running {
 		_ = dev.Stop()
-		dev.Uninit()
-	}
-	if ctx != nil {
-		_ = ctx.Uninit()
-		ctx.Free()
 	}
 
 	r.mu.Lock()
@@ -209,6 +264,13 @@ func (r *Recorder) Stop() []float32 {
 	r.level = 0
 	r.mu.Unlock()
 	return out
+}
+
+// Close stops capturing if needed and releases the device for good.
+func (r *Recorder) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeLocked()
 }
 
 // Cancel discards the recording.

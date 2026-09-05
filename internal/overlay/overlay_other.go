@@ -9,3 +9,7 @@ func SetLevel(level float64)        {}
 func Hide()                         {}
 func Snapshot(path string) error    { return nil }
 func applyPosition(code int)        {}
+
+func showHistory(entries []HistoryEntry, onPick func(int), onClose func()) {}
+func hideHistory()                                                         {}
+func isHistoryOpen() bool                                                  { return false }

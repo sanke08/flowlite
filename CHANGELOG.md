@@ -5,7 +5,49 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-06
+
+### Added
+- **Transcript history panel.** Hold the hotkey together with Right Shift and
+  the pill morphs into a scrollable list of recent transcripts; click one to
+  paste it again. Escape, or a click anywhere else, closes it.
+- **"Remember transcripts" setting** in `flowlite settings`, and a "Clear all
+  history" action under "Recent transcripts". Off means nothing new is
+  recorded; existing history stays until cleared.
+
+- **FlowLite always runs in the background now.** `flowlite` starts it and
+  gives the terminal straight back; closing that window, or pressing Ctrl+C in
+  it, no longer stops dictation. `flowlite stop` is the one way to stop it.
+  (`flowlite --no-paste` still runs in the terminal, because printing
+  transcripts instead of pasting them needs somewhere to print.)
+- `flowlite reload` makes a running FlowLite pick up new settings or a newly
+  installed binary, in place.
+
 ### Fixed
+- **Sound cues stuttered or went silent on macOS.** Three causes, all fixed:
+  the miniaudio output stream audibly stutters on macOS 26 even when it is fed
+  on time, so cues now play through the system's own AVAudioPlayer, one
+  preloaded player per cue; opening the microphone on every key-down briefly
+  attached the capture unit to the speaker and reset the speaker session under
+  the live cue stream, so the microphone unit is now opened once and only
+  started and stopped per dictation (key-down is faster for it, and the mic
+  indicator behaves as before); and the "still transcribing" tick had been
+  set to fire twenty times a second, which the ear hears as one buzzing tone.
+- The cue synthesiser renders at 48 kHz, the rate the built-in speakers run
+  at, instead of 44.1 kHz resampled on the way out.
+- On Windows and Linux, which keep the miniaudio player, cues are rendered
+  before the output device opens, the real-time callback never blocks on a
+  lock, and a stream that stops asking for samples is rebuilt automatically.
+- The clipboard restore after a paste no longer blocks the daemon's event
+  loop; shutdown waits for a pending restore so the transcript is never left
+  on the clipboard.
+
+### Changed
+- **The "working" cue is a clock ticker**: a sharp click over a short woody
+  knock, every 150 ms while transcription runs.
+- History entries store only time and text. Older history files with the
+  previous `pasted`/`audio_seconds` fields remain readable.
+
 - **Quitting during a transcription could crash.** `Model.Close` called
   `whisper_free` without waiting for `whisper_full`, so Ctrl+C mid-dictation —
   or any restart triggered by `settings` or `update` — was a use-after-free.
@@ -52,16 +94,6 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   `reload` now wait for the daemon to actually come back and confirm it
   before returning.
 
-### Added
-- **FlowLite always runs in the background now.** `flowlite` starts it and
-  gives the terminal straight back; closing that window, or pressing Ctrl+C in
-  it, no longer stops dictation. `flowlite stop` is the one way to stop it.
-  (`flowlite --no-paste` still runs in the terminal, because printing
-  transcripts instead of pasting them needs somewhere to print.)
-- `flowlite reload` makes a running FlowLite pick up new settings or a newly
-  installed binary, in place.
-
-### Changed
 - `flowlite doctor` and the settings menu now say whether FlowLite is running
   in a terminal or in the background, because what you would do to it differs.
 - Releases: editing `VERSION` by hand now releases that exact version, which is
@@ -94,7 +126,7 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 ## [0.4.7] — 2026-09-04
 
 ### Fixed
-- Audio underruns during high CPU load: the capture period is now 25 ms.
+- Audio underruns during high CPU load: the playback period is now 25 ms.
 
 ## [0.4.6] — 2026-09-04
 

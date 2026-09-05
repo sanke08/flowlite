@@ -2,7 +2,10 @@ package cli
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,6 +97,61 @@ func (r *release) assetFor(goos, goarch string) (asset, error) {
 		}
 	}
 	return asset{}, fmt.Errorf("release %s has no %s asset — see %s", r.TagName, suffix, releasesPage)
+}
+
+// checksumAssetName is the file the release workflow's "Checksums" step
+// publishes alongside every build (`shasum -a 256 flowlite-* > SHA256SUMS`):
+// one sha256 line per asset, in standard shasum format.
+const checksumAssetName = "SHA256SUMS"
+
+// checksumFor downloads the release's SHA256SUMS asset and returns the hex
+// digest it lists for assetName (matched against the original asset
+// filename, e.g. the Windows zip — not the exe later extracted from it).
+//
+// A release that does not publish SHA256SUMS, or one where the file has no
+// line for this asset, is treated as a hard failure rather than a silent
+// skip: this check exists specifically to keep an unverified binary from
+// ever being executed or installed, so "cannot verify" must behave the same
+// as "verification failed".
+func checksumFor(ctx context.Context, rel *release, assetName string) (string, error) {
+	var sums asset
+	found := false
+	for _, a := range rel.Assets {
+		if a.Name == checksumAssetName {
+			sums = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("release %s does not publish %s — refusing to install an unverified binary; see %s", rel.TagName, checksumAssetName, releasesPage)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sums.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "flowlite/"+Version)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("downloading %s: %w", checksumAssetName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("downloading %s: HTTP %d", checksumAssetName, resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 2 && fields[1] == assetName {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("reading %s: %w", checksumAssetName, err)
+	}
+	return "", fmt.Errorf("%s has no entry for %s — refusing to install an unverified binary; see %s", checksumAssetName, assetName, releasesPage)
 }
 
 // fetchLatest asks GitHub for the newest release.
@@ -250,7 +308,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Updating %s → %s\n", dim(Version), bold(rel.TagName))
 	fmt.Println(dim("  " + target))
-	if err := applyUpdate(ctx, target, a); err != nil {
+	if err := applyUpdate(ctx, target, rel, a); err != nil {
 		if ctx.Err() != nil {
 			return errors.New("interrupted — nothing was changed")
 		}
@@ -279,10 +337,11 @@ func checkWritable(target string) error {
 	return nil
 }
 
-// applyUpdate downloads a into a temp file beside target and swaps it in.
-// The temp file lives in the same directory so the final rename is a single
-// atomic step: at no point is there a half-written flowlite on PATH.
-func applyUpdate(ctx context.Context, target string, a asset) error {
+// applyUpdate downloads a into a temp file beside target, verifies it
+// against the release's published SHA256SUMS, and swaps it in. The temp file
+// lives in the same directory so the final rename is a single atomic step:
+// at no point is there a half-written flowlite on PATH.
+func applyUpdate(ctx context.Context, target string, rel *release, a asset) error {
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".flowlite-update-*")
 	if err != nil {
@@ -291,7 +350,17 @@ func applyUpdate(ctx context.Context, target string, a asset) error {
 	tmpPath := tmp.Name()
 	cleanup := func() { os.Remove(tmpPath) }
 
-	if err := downloadTo(ctx, tmp, a); err != nil {
+	// Fetched before spending time on the download itself: if the release
+	// has nothing to verify against, there is no point pulling the asset at
+	// all.
+	wantSum, err := checksumFor(ctx, rel, a.Name)
+	if err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+
+	if err := downloadTo(ctx, tmp, a, wantSum); err != nil {
 		tmp.Close()
 		cleanup()
 		return err
@@ -337,9 +406,13 @@ func applyUpdate(ctx context.Context, target string, a asset) error {
 	return nil
 }
 
-// downloadTo streams the asset into f with a progress bar and refuses
-// anything whose length does not match what the release API published.
-func downloadTo(ctx context.Context, f *os.File, a asset) error {
+// downloadTo streams the asset into f with a progress bar, refuses anything
+// whose length does not match what the release API published, and — the
+// check that actually matters, since sizes alone prove nothing about
+// content — refuses anything whose sha256 does not match wantSHA256 (from
+// the release's SHA256SUMS asset). This must run before the caller ever
+// chmods, xattrs, executes (sanityCheck), or installs the file.
+func downloadTo(ctx context.Context, f *os.File, a asset, wantSHA256 string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 	if err != nil {
 		return err
@@ -357,7 +430,8 @@ func downloadTo(ctx context.Context, f *os.File, a asset) error {
 		return fmt.Errorf("%s: server offers %d bytes but the release lists %d — refusing", a.Name, resp.ContentLength, a.Size)
 	}
 
-	var w io.Writer = f
+	hash := sha256.New()
+	var w io.Writer = io.MultiWriter(f, hash)
 	if term.IsTerminal(int(os.Stderr.Fd())) {
 		bar := progressbar.NewOptions64(a.Size,
 			progressbar.OptionSetDescription("  "+a.Name),
@@ -369,7 +443,7 @@ func downloadTo(ctx context.Context, f *os.File, a asset) error {
 			progressbar.OptionSetWriter(os.Stderr),
 		)
 		defer func() { _ = bar.Finish() }()
-		w = io.MultiWriter(f, bar)
+		w = io.MultiWriter(f, hash, bar)
 	}
 	n, err := io.Copy(w, io.LimitReader(resp.Body, a.Size+1))
 	if err != nil {
@@ -377,6 +451,11 @@ func downloadTo(ctx context.Context, f *os.File, a asset) error {
 	}
 	if n != a.Size {
 		return fmt.Errorf("%s: got %d bytes, release lists %d — download incomplete or altered", a.Name, n, a.Size)
+	}
+	if wantSHA256 != "" {
+		if sum := hex.EncodeToString(hash.Sum(nil)); sum != wantSHA256 {
+			return fmt.Errorf("%s failed checksum verification — the download is corrupt or was tampered with; run the same command again", a.Name)
+		}
 	}
 	return nil
 }

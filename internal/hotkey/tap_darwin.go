@@ -32,6 +32,8 @@ var (
 	tapMu     sync.Mutex
 	tapTarget int
 	tapOut    chan<- KeyEvent
+
+	rightShiftHeld bool
 )
 
 // ErrNotTrusted is returned when macOS refuses to create the event tap,
@@ -61,8 +63,22 @@ func StartTap(keyName string, out chan<- KeyEvent) (*Tap, error) {
 // Stop removes the tap.
 func (t *Tap) Stop() { C.flowlite_tap_stop() }
 
+// ModifierHeld reports whether Right Shift is currently held, for gestures
+// that combine it with the dictation hotkey. Safe to call from any goroutine.
+func ModifierHeld() bool {
+	tapMu.Lock()
+	defer tapMu.Unlock()
+	return rightShiftHeld
+}
+
 //export flowliteTapEvent
 func flowliteTapEvent(keycode C.int, down C.bool) {
+	if int(keycode) == 60 { // right shift; tracked regardless of the configured target
+		tapMu.Lock()
+		rightShiftHeld = bool(down)
+		tapMu.Unlock()
+	}
+
 	tapMu.Lock()
 	target, out := tapTarget, tapOut
 	tapMu.Unlock()

@@ -43,6 +43,7 @@ func testMicrophone(cfg *config.Config) error {
 	spin.Done(fmt.Sprintf("loading %s… %s (%s, %s)", m.Label, ok("ready"), dev, time.Since(t0).Round(time.Millisecond)))
 
 	rec := audio.NewRecorder(cfg.InputDevice, testSeconds+1)
+	defer rec.Close()
 	fmt.Printf("recording for %ds — speak now\n", testSeconds)
 	if err := rec.Start(); err != nil {
 		return err

@@ -5,7 +5,10 @@
 // not trigger autocomplete on every keystroke.
 package inject
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 const (
 	// Give the OS a moment to register the new clipboard owner before the
@@ -18,11 +21,26 @@ const (
 	// clipboard and inserts the user's old text into their document instead of
 	// the transcript. That failure is silent and lands in real work, so this
 	// waits long enough to be dull rather than tight enough to be clever.
-	restoreDelay = 600 * time.Millisecond
+	//
+	// The restore itself now runs in the background (see putBack/pending
+	// below) rather than blocking Paste's return, so this delay no longer
+	// costs the caller any wall-clock time — it only bounds how long the old
+	// clipboard contents keep waiting to come back. Exported so a caller
+	// like daemon.Close can size its WaitPending timeout relative to it
+	// rather than picking an unrelated number.
+	RestoreDelay = 600 * time.Millisecond
 )
 
+// pending tracks in-flight background clipboard restores (see putBack), so
+// shutdown can wait for them instead of racing the process exit against a
+// sleep that is no longer inline in Paste. See WaitPending.
+var pending sync.WaitGroup
+
 // Paste puts text on the clipboard, sends the paste shortcut, and (optionally)
-// restores what was there before.
+// restores what was there before. It returns as soon as the keystroke itself
+// has been sent — the clipboard restore, when there is one, continues in a
+// background goroutine tracked by `pending` (see WaitPending) rather than
+// blocking the caller for RestoreDelay.
 func Paste(text string, restore bool) error {
 	if text == "" {
 		return nil
@@ -47,14 +65,24 @@ func Paste(text string, restore bool) error {
 	// so the wait is pointless, but leaving the transcript sitting on the
 	// clipboard would quietly destroy whatever the user had copied, on every
 	// dictation, for as long as the permission stays off.
+	//
+	// Runs in its own goroutine so Paste itself returns as soon as the
+	// keystroke has been sent, rather than blocking the caller for the whole
+	// wait. `pending` lets WaitPending (called from daemon.Close) give this
+	// goroutine a bounded chance to finish before the process exits, since
+	// nothing else waits for it now that Paste no longer blocks on it.
 	putBack := func(wait time.Duration) {
 		if !restore || !hadPrevious {
 			return
 		}
-		time.Sleep(wait)
-		if clipboardSerial() == ours {
-			_ = clipboardSet(previous)
-		}
+		pending.Add(1)
+		go func() {
+			defer pending.Done()
+			time.Sleep(wait)
+			if clipboardSerial() == ours {
+				_ = clipboardSet(previous)
+			}
+		}()
 	}
 
 	time.Sleep(preDelay)
@@ -62,8 +90,27 @@ func Paste(text string, restore bool) error {
 		putBack(0)
 		return err
 	}
-	putBack(restoreDelay)
+	putBack(RestoreDelay)
 	return nil
+}
+
+// WaitPending blocks until every in-flight background clipboard restore
+// started by Paste (see putBack above) has finished, or until timeout
+// elapses, whichever comes first — bounded so shutdown can never hang
+// indefinitely on a stuck goroutine. daemon.Close calls this so the process
+// never exits with a pending restore still waiting to run, which would
+// silently leave the transcript on the clipboard instead of whatever the
+// user had copied before dictating.
+func WaitPending(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		pending.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
 }
 
 // ClipboardRoundTrip is used by `doctor`: write, read back, restore.

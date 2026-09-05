@@ -18,10 +18,19 @@
 # Doc-only edits and workflow edits ship nothing. The bump commit cannot
 # re-trigger the workflow: pushes made with GITHUB_TOKEN never do, and it
 # carries [skip ci] as well. Free for public repos.
+#
+# Pull requests (including from forks) only ever run `go vet`/`go test -race`
+# in the separate `test` job below. That job never tags, pushes, or
+# publishes anything, so a PR build cannot ship a release no matter what.
 name: Release
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".github/**"
+  pull_request:
     branches: [main]
     paths-ignore:
       - "**.md"
@@ -36,15 +45,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Pull requests never reach this job (see the `if:` below): they only run
+  # the `test` job, which has no `contents: write` and never tags or pushes.
   release:
     name: Build and publish
+    if: github.event_name != 'pull_request'
     runs-on: macos-14   # Apple Silicon runner; Metal is compiled in, not needed at build time
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # tags are needed to compute the next version
 
-      - name: Decide the version, then tag it
+      - name: Decide the version
         id: ver
         run: |
           set -euo pipefail
@@ -86,7 +98,10 @@ jobs:
             echo "hand-set release: $latest -> $next"
           fi
 
-          git tag -a "$next" -m "FlowLite $next"
+          # The tag itself is NOT created here. It's created by the "Tag the
+          # release" step below, which only runs after Tests has passed —
+          # that way a commit that fails go vet/go test never gets tagged,
+          # built, or published.
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
@@ -99,7 +114,16 @@ jobs:
       - name: Tests
         run: |
           brew install whisper-cpp   # the dev build links against it
-          go vet ./... && go test ./...
+          go vet ./... && go test -race ./...
+
+      - name: Tag the release
+        run: |
+          set -euo pipefail
+          # Only reached if Tests (above) passed, since a failing step stops
+          # the job before this one runs. This is what actually creates the
+          # git tag; "Decide the version" above only computed $next.
+          next="${{ steps.ver.outputs.version }}"
+          git tag -a "$next" -m "FlowLite $next"
 
       - name: macOS binary (static whisper.cpp, Metal embedded, macOS 13+)
         run: make release
@@ -122,3 +146,23 @@ jobs:
           gh release create "$V" dist/flowlite-*-macos-arm64 dist/flowlite-*-windows-x64.zip dist/SHA256SUMS \
             --title "FlowLite $V" --notes-file release-notes.md
           echo "published https://github.com/${{ github.repository }}/releases/tag/$V"
+
+  # PR builds (including from forks). Read-only: no tagging, no pushing, no
+  # release. Just proves go vet and the tests still pass.
+  test:
+    name: Vet and test
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Tests
+        run: |
+          brew install whisper-cpp   # the dev build links against it
+          go vet ./... && go test -race ./...

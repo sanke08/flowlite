@@ -31,13 +31,13 @@ func TestAppendListLast(t *testing.T) {
 	s := newStore(t)
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 5; i++ {
-		e := Entry{Time: base.Add(time.Duration(i) * time.Minute), Text: fmt.Sprintf("line %d", i), Pasted: i%2 == 0, AudioSeconds: float64(i) + 0.5}
+		e := Entry{Time: base.Add(time.Duration(i) * time.Minute), Text: fmt.Sprintf("line %d", i)}
 		if err := s.Append(e); err != nil {
 			t.Fatal(err)
 		}
 	}
 	last, ok := s.Last()
-	if !ok || last.Text != "line 4" || !last.Pasted || last.AudioSeconds != 4.5 || !last.Time.Equal(base.Add(4*time.Minute)) {
+	if !ok || last.Text != "line 4" || !last.Time.Equal(base.Add(4*time.Minute)) {
 		t.Fatalf("Last = %+v, %v", last, ok)
 	}
 	list, err := s.List(3)
@@ -66,14 +66,14 @@ func TestEmptyTextIsNotRecorded(t *testing.T) {
 func TestFileIsOneRFC3339JSONObjectPerLine(t *testing.T) {
 	s := newStore(t)
 	when := time.Date(2026, 9, 5, 12, 34, 56, 0, time.FixedZone("IST", 5*3600+1800))
-	if err := s.Append(Entry{Time: when, Text: "hello\nworld", Pasted: true, AudioSeconds: 1.25}); err != nil {
+	if err := s.Append(Entry{Time: when, Text: "hello\nworld"}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(s.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"time":"2026-09-05T12:34:56+05:30","text":"hello\nworld","pasted":true,"audio_seconds":1.25}` + "\n"
+	want := `{"time":"2026-09-05T12:34:56+05:30","text":"hello\nworld"}` + "\n"
 	if string(b) != want {
 		t.Fatalf("file = %q\nwant   %q", b, want)
 	}
@@ -101,6 +101,37 @@ func TestCompaction(t *testing.T) {
 	}
 	if _, err := os.Stat(s.Path() + ".tmp"); !os.IsNotExist(err) {
 		t.Fatal("temp file left behind")
+	}
+}
+
+func TestClear(t *testing.T) {
+	s := newStore(t)
+	if err := s.Append(Entry{Text: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(Entry{Text: "two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(0)
+	if err != nil || len(list) != 0 {
+		t.Fatalf("List after Clear = %v, %v; want empty, nil", list, err)
+	}
+	if _, ok := s.Last(); ok {
+		t.Fatal("Last after Clear must report nothing")
+	}
+	if _, err := os.Stat(s.Path() + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("temp file left behind")
+	}
+	// The store must still be usable afterward.
+	if err := s.Append(Entry{Text: "three"}); err != nil {
+		t.Fatal(err)
+	}
+	last, ok := s.Last()
+	if !ok || last.Text != "three" {
+		t.Fatalf("Last after Clear+Append = %+v, %v", last, ok)
 	}
 }
 

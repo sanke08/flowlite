@@ -1,7 +1,8 @@
 // Package history remembers recent transcripts so the user can recover one
 // that landed nowhere — a triple tap pastes the last again, and `flowlite
-// history` / `flowlite last` print them. Entries live in an append-only
-// history.jsonl in the config directory, one JSON object per line.
+// settings` → "Recent transcripts" lists and copies any recent one. Entries
+// live in an append-only history.jsonl in the config directory, one JSON
+// object per line.
 package history
 
 import (
@@ -28,27 +29,28 @@ const (
 
 // Entry is one transcript.
 type Entry struct {
-	Time         time.Time
-	Text         string
-	Pasted       bool // false when the paste failed or --no-paste was on
-	AudioSeconds float64
+	Time time.Time
+	Text string
 }
 
 // wire is the on-disk shape; time is RFC3339 so the file is readable by hand.
+//
+// Older history files on disk may still have "pasted"/"audio_seconds" keys
+// from before the schema was simplified down to just time+text —
+// json.Unmarshal silently ignores unknown keys, so those files remain
+// readable without any migration code.
 type wire struct {
-	Time         string  `json:"time"`
-	Text         string  `json:"text"`
-	Pasted       bool    `json:"pasted"`
-	AudioSeconds float64 `json:"audio_seconds"`
+	Time string `json:"time"`
+	Text string `json:"text"`
 }
 
 func (e Entry) toWire() wire {
-	return wire{Time: e.Time.Format(time.RFC3339), Text: e.Text, Pasted: e.Pasted, AudioSeconds: e.AudioSeconds}
+	return wire{Time: e.Time.Format(time.RFC3339), Text: e.Text}
 }
 
 func (w wire) toEntry() Entry {
 	t, _ := time.Parse(time.RFC3339, w.Time)
-	return Entry{Time: t, Text: w.Text, Pasted: w.Pasted, AudioSeconds: w.AudioSeconds}
+	return Entry{Time: t, Text: w.Text}
 }
 
 // Store is a history file. Methods are safe to call from several goroutines
@@ -152,6 +154,25 @@ func (s *Store) readLocked() ([]Entry, error) {
 		out = append(out, w.toEntry())
 	}
 	return out, sc.Err()
+}
+
+// Clear erases every entry, leaving a valid, empty history file. Like
+// compactLocked, the rewrite goes through a temp file and rename so a crash
+// can never leave the path briefly missing or half-written.
+func (s *Store) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tmp := s.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, s.path)
 }
 
 // compactLocked rewrites the file with only the newest Keep entries when it

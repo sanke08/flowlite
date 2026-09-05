@@ -39,19 +39,20 @@ the background, reset, uninstall.`,
 type menuItem string
 
 const (
-	itemModel     menuItem = "model"
-	itemKey       menuItem = "key"
-	itemThreshold menuItem = "threshold"
-	itemPill      menuItem = "pill"
-	itemMic       menuItem = "mic"
-	itemLang      menuItem = "lang"
-	itemSounds    menuItem = "sounds"
-	itemTestMic   menuItem = "testmic"
-	itemHistory   menuItem = "history"
-	itemDaemon    menuItem = "daemon"
-	itemReset     menuItem = "reset"
-	itemUninstall menuItem = "uninstall"
-	itemDone      menuItem = "done"
+	itemModel         menuItem = "model"
+	itemKey           menuItem = "key"
+	itemThreshold     menuItem = "threshold"
+	itemPill          menuItem = "pill"
+	itemMic           menuItem = "mic"
+	itemLang          menuItem = "lang"
+	itemSounds        menuItem = "sounds"
+	itemTestMic       menuItem = "testmic"
+	itemHistory       menuItem = "history"
+	itemHistoryToggle menuItem = "historytoggle"
+	itemDaemon        menuItem = "daemon"
+	itemReset         menuItem = "reset"
+	itemUninstall     menuItem = "uninstall"
+	itemDone          menuItem = "done"
 )
 
 // languages is the short list offered before the free-text fallback. Codes
@@ -162,6 +163,7 @@ func menuOptions(cfg *config.Config) []huh.Option[menuItem] {
 		huh.NewOption(row("Sounds", onOff(cfg.Sounds)), itemSounds),
 		huh.NewOption(row("Test microphone", "record 4 s, print the transcript"), itemTestMic),
 		huh.NewOption(row("Recent transcripts", historyValue()), itemHistory),
+		huh.NewOption(row("Remember transcripts", onOff(cfg.HistoryEnabled)), itemHistoryToggle),
 		huh.NewOption(row("Background daemon", daemonStatus()), itemDaemon),
 		huh.NewOption(row("Reset to defaults", ""), itemReset),
 		huh.NewOption(row("Uninstall FlowLite", ""), itemUninstall),
@@ -218,6 +220,8 @@ func runMenuItem(cfg *config.Config, item menuItem) (menuResult, error) {
 		return resNothing, testMicrophone(cfg)
 	case itemHistory:
 		return resNothing, copyTranscript(cfg)
+	case itemHistoryToggle:
+		return asResult(changeHistoryEnabled(cfg))
 	case itemDaemon:
 		return daemonMenu()
 	case itemReset:
@@ -473,6 +477,25 @@ func changeSounds(cfg *config.Config) (bool, error) {
 	return save(cfg, "sounds", onOff(on))
 }
 
+func changeHistoryEnabled(cfg *config.Config) (bool, error) {
+	choice := onOff(cfg.HistoryEnabled)
+	if err := huh.NewSelect[string]().
+		Title("Remember transcripts").
+		Description("Keeps recent transcripts so a triple-tap or \"Recent transcripts\" can recover one. Off means nothing new is recorded from here on — existing history stays until cleared.").
+		Options(
+			huh.NewOption("On", "on"),
+			huh.NewOption("Off", "off"),
+		).Value(&choice).Run(); err != nil {
+		return false, err
+	}
+	on := choice == "on"
+	if on == cfg.HistoryEnabled {
+		return false, nil
+	}
+	cfg.HistoryEnabled = on
+	return save(cfg, "remember transcripts", onOff(on))
+}
+
 // ---- rows 9–11: things that are not settings ---------------------------------
 
 // copyTranscript lists the last ten transcripts and puts the chosen one on
@@ -493,24 +516,39 @@ func copyTranscript(cfg *config.Config) error {
 	}
 	opts := make([]huh.Option[int], 0, len(entries)+1)
 	for i, e := range entries {
-		mark := ok("✓")
-		if !e.Pasted {
-			mark = warn("✗")
-		}
 		text := oneLine(e.Text)
 		if r := []rune(text); len(r) > 60 {
 			text = string(r[:60]) + "…"
 		}
-		label := fmt.Sprintf("%s  %s %s  %s", dim(e.Time.Local().Format("15:04")), dim(fmt.Sprintf("%4.1fs", e.AudioSeconds)), mark, text)
+		label := fmt.Sprintf("%s  %s", dim(e.Time.Local().Format("15:04")), text)
 		opts = append(opts, huh.NewOption(label, i))
 	}
+	const clearAll = -2
+	opts = append(opts, huh.NewOption(warn("Clear all history"), clearAll))
 	opts = append(opts, huh.NewOption(dim("← back"), -1))
 	pick := 0
 	if err := huh.NewSelect[int]().
 		Title("Recent transcripts").
-		Description("✓ pasted · ✗ nowhere to paste at the time. Pick one to copy it.").
+		Description("Pick one to copy it.").
 		Options(opts...).Value(&pick).Run(); err != nil {
 		return err
+	}
+	if pick == clearAll {
+		confirm := false
+		if err := huh.NewConfirm().
+			Title("Clear all history?").
+			Description("Permanently erases every remembered transcript. This cannot be undone.").
+			Affirmative("Clear").Negative("Keep").Value(&confirm).Run(); err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		if err := store.Clear(); err != nil {
+			return fmt.Errorf("clear history: %w", err)
+		}
+		fmt.Printf("%s history cleared\n", ok("✓"))
+		return nil
 	}
 	if pick < 0 {
 		return nil

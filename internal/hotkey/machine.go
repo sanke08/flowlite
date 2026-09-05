@@ -9,6 +9,7 @@
 //	one press while hands-free   -> stop and transcribe
 //	tap, tap, tap                -> paste the previous transcript again
 //	a single tap                 -> nothing; the recording is discarded
+//	held + Right Shift, past the threshold  -> open transcript history
 //
 // Hands-free is confirmed only once the tap window closes after the second
 // tap, so a triple tap never flashes the Listening pill on its way to the
@@ -39,6 +40,7 @@ const (
 	DoubleTapped         // two quick taps; waiting out the window for a third
 	HandsFree            // double-tap confirmed; recording with nothing held
 	TripleTapped         // third tap is down; waiting for release before pasting
+	HistoryHeld          // held past the threshold with Right Shift down; history panel
 )
 
 func (g Gesture) String() string {
@@ -57,6 +59,8 @@ func (g Gesture) String() string {
 		return "hands-free"
 	case TripleTapped:
 		return "triple-tapped"
+	case HistoryHeld:
+		return "history-held"
 	}
 	return "?"
 }
@@ -89,6 +93,9 @@ const (
 	Discard
 	// Cancel: Esc during a confirmed recording.
 	Cancel
+	// ShowHistory: the key has been held past the threshold together with
+	// Right Shift. Open the transcript-history panel.
+	ShowHistory
 )
 
 func (e Event) String() string {
@@ -107,6 +114,8 @@ func (e Event) String() string {
 		return "discard"
 	case Cancel:
 		return "cancel"
+	case ShowHistory:
+		return "show-history"
 	}
 	return "none"
 }
@@ -229,6 +238,11 @@ func (m *Machine) Release(k KeyKind) Event {
 		// The hotkey is up now, so the paste is safe to post.
 		m.state = Idle
 		return PasteLast
+	case HistoryHeld:
+		// Releasing the chord doesn't end anything; the history panel's own
+		// open/close lifecycle lives outside the machine, in the daemon.
+		m.state = Idle
+		return None
 	}
 	return None
 }
@@ -236,12 +250,19 @@ func (m *Machine) Release(k KeyKind) Event {
 // Expire lets time move the machine on. Call it on a steady tick: it confirms
 // a hold once the threshold passes, discards a lone tap once the window
 // closes, and confirms hands-free once a double tap's window closes with no
-// third tap. Returns the event to act on, or None.
-func (m *Machine) Expire() Event {
+// third tap. modifierHeld reports whether Right Shift is currently held; it
+// only matters at the moment the hold threshold is reached, deciding between
+// push-to-talk and the history-panel gesture. Returns the event to act on, or
+// None.
+func (m *Machine) Expire(modifierHeld bool) Event {
 	now := m.now()
 	switch m.state {
 	case Undecided:
 		if m.keyDown && now.Sub(m.pressedAt) >= m.threshold {
+			if modifierHeld {
+				m.state = HistoryHeld
+				return ShowHistory
+			}
 			m.state = Holding
 			return HoldConfirmed
 		}
