@@ -9,11 +9,11 @@
 // Success and cancel draw nothing new: the pill simply fades out.
 //
 // The pill sits centred on one edge of the screen (bottom by default, or top,
-// left, right). At the bottom it sits EDGE_GAP points in from the *physical*
-// edge, so it overlaps the Dock area on purpose. At the top it clears the menu
-// bar and the camera notch first, then the same gap. Left and right sit flush
-// against the side, with no gap at all. On the left/right edges the capsule
-// stands upright and the bars run horizontally, stacked top to bottom.
+// left, right), EDGE_GAP points in from the *physical* edge on every side. At
+// the bottom that overlaps the Dock area on purpose; at the top it clears the
+// menu bar and the camera notch first, then that same gap. On the left/right
+// edges the capsule stands upright and the bars run horizontally, stacked top
+// to bottom.
 // Every transition is time-based and eased, so it reads as one continuous
 // object changing shape.
 
@@ -34,9 +34,10 @@ enum { POS_BOTTOM, POS_TOP, POS_LEFT, POS_RIGHT };
 
 static int position = POS_BOTTOM;
 static BOOL vertical(void) { return position == POS_LEFT || position == POS_RIGHT; }
-// Left and right sit flush against the side of the screen; top and bottom keep
-// the gap, which is what lets the bottom pill ride over the Dock.
-static double edgeGap(void) { return vertical() ? 0.0 : EDGE_GAP; }
+// Every edge keeps the same gap in from the physical edge — on the bottom
+// that is what lets the pill ride over the Dock; on the sides it is just
+// consistent with that rather than sitting flush against the screen.
+static double edgeGap(void) { return EDGE_GAP; }
 
 static double now_s(void) { return CACurrentMediaTime(); }
 static double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }

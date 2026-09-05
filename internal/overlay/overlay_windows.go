@@ -303,8 +303,9 @@ func ensureWindow() {
 }
 
 // reposition centres the pill on the chosen edge of the primary screen and
-// sizes it for that orientation: top and bottom sit edgeGap px in from the
-// physical edge, left and right sit flush against it.
+// sizes it for that orientation, edgeGap px in from the physical edge on
+// every side — on the bottom that is what lets the pill ride over the
+// taskbar.
 // Must be called with mu held.
 func reposition() {
 	sw, _, _ := pGetSystemMetrics.Call(smCxScreen)
@@ -314,12 +315,7 @@ func reposition() {
 	if vertical() {
 		winW, winH = pillShort, pillLong
 	}
-	// Left and right sit flush against the side of the screen; top and bottom
-	// keep the gap, which is what lets the bottom pill ride over the taskbar.
 	gap := int32(edgeGap)
-	if vertical() {
-		gap = 0
-	}
 	switch posCode {
 	case 1: // top
 		baseX, baseY = scrW/2-winW/2, gap

@@ -100,6 +100,16 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 		logger.Printf("reloading")
 		d.Close() // waits for a transcription in flight; releases the key tap
 		removePID()
+		// d.Close just tore down this pid's CoreAudio output device; exec-ing
+		// immediately hands the (same pid, fresh image) process a new one
+		// before the OS has necessarily finished releasing the old
+		// registration, which is heard as a stuttering or missing first cue.
+		// A cold-started daemon never hits this — there the old pid is a
+		// separate, already-dying process, not this one an instant ago.
+		// Nothing waits on this reload from the caller's side (reload(pid)
+		// signals and returns immediately), so there is no cost to erring
+		// generous rather than shaving this to the minimum that seemed to work.
+		time.Sleep(500 * time.Millisecond)
 		if err := reexecSelf(); err != nil {
 			logger.Printf("reload failed: %v", err)
 			stop() // could not reload, so shut down rather than run on stale

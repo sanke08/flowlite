@@ -42,7 +42,7 @@ func NewPlayer(enabled bool) (*Player, error) {
 	if !enabled {
 		return p, nil
 	}
-	ctx, dev, err := openStream(p.mix)
+	ctx, dev, err := openWithRetry(p.mix)
 	if err != nil {
 		return p, err
 	}
@@ -50,9 +50,42 @@ func NewPlayer(enabled bool) (*Player, error) {
 	return p, nil
 }
 
+// openRetries and openRetryDelay: applying a settings change or an update
+// reloads FlowLite by replacing its own process image in place (same pid,
+// see internal/cli/proc_unix.go reexecSelf) right after the old process just
+// tore down this exact device. CoreAudio can take a moment to finish
+// releasing that pid's previous registration before it will hand out a new
+// one, and unlike a cold start there is no separate dying process here to
+// wait out — so a first failure here is retried rather than taken as final.
+// Nothing times this out from the caller's side — reload(pid) just sends the
+// signal and returns, it never waits for the reopen to finish — so there is
+// no reason to be stingy here; a cold start never needs more than the first
+// attempt, so a generous budget only ever spends time on the case it exists
+// for.
+const (
+	openRetries    = 10
+	openRetryDelay = 200 * time.Millisecond
+)
+
+// openWithRetry wraps openStream with that retry.
+func openWithRetry(onData malgo.DataProc) (*malgo.AllocatedContext, *malgo.Device, error) {
+	var lastErr error
+	for attempt := 0; attempt < openRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(openRetryDelay)
+		}
+		ctx, dev, err := openStream(onData)
+		if err == nil {
+			return ctx, dev, nil
+		}
+		lastErr = err
+	}
+	return nil, nil, lastErr
+}
+
 // openStream opens the default playback device with the settings the Player
-// needs. Split out of NewPlayer so Reopen can rebuild the stream from
-// scratch without duplicating the config.
+// needs. Split out so NewPlayer and Reopen can both retry it without
+// duplicating the config.
 func openStream(onData malgo.DataProc) (*malgo.AllocatedContext, *malgo.Device, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
@@ -112,7 +145,7 @@ func (p *Player) Reopen() {
 		oldCtx.Free()
 	}
 
-	ctx, dev, err := openStream(p.mix)
+	ctx, dev, err := openWithRetry(p.mix)
 	if err != nil {
 		return
 	}

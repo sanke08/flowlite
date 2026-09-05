@@ -37,6 +37,14 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   respawn it detached, which took over the terminal tab someone was working in
   and moved it to the mode that can lose that grant. There is nothing to
   restart by hand in either mode now.
+- **That in-place reload could leave sound stuttering or silent.** Replacing
+  the process image hands CoreAudio a new audio client under the very pid
+  whose previous one it was still tearing down, with no gap for that to
+  settle — unlike a cold start, where the old pid is a separate process
+  already on its way out. Reopening the output device now retries briefly on
+  failure instead of giving up silently, and the reload pauses just long
+  enough after closing the old device for the teardown to finish before
+  opening the new one.
 
 ### Added
 - **FlowLite always runs in the background now.** `flowlite` starts it and
