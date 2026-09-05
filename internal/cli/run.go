@@ -335,23 +335,57 @@ func daemonStatus() string {
 }
 
 // applyToRunningDaemon makes a running daemon pick up new settings or a new
-// binary. It reloads in place where it can, which is invisible and instant and
-// keeps a foreground session alive; otherwise it falls back to a stop/start.
-// Either way the user does not have to do anything.
+// binary. It reloads in place where it can, which keeps a foreground session
+// alive; otherwise it falls back to a stop/start. Either way it waits for the
+// daemon to actually come back and says so, rather than returning the moment
+// the signal is sent — reload(pid) itself does not wait, so doing that would
+// tell the user it's "applying" and hand the prompt straight back before the
+// model, sounds and hotkey are actually live again, which is exactly the
+// window where trying it looks like FlowLite broke.
 func applyToRunningDaemon(what string) error {
 	pid, running := daemonRunning()
 	if !running {
 		return nil
 	}
 	if err := reload(pid); err == nil {
-		fmt.Println(dim("  applying " + what + "…"))
-		return nil
+		return waitForReload(what)
 	}
 	fmt.Println(dim("  restarting FlowLite to apply " + what + "…"))
 	if err := stopBackground(); err != nil {
 		return err
 	}
 	return startBackground()
+}
+
+// waitForReload watches the pidfile disappear — the old process tearing
+// itself down — and come back with the same pid — the fresh image up,
+// through daemon.New and writePID again — so "applied" means it actually
+// is, not just that the signal made it there.
+func waitForReload(what string) error {
+	spin := startSpinner("applying " + what + "…")
+	defer spin.Stop()
+
+	sawGone := false
+	// 15s: the same budget stopBackground already gives a shutdown: this is
+	// the same daemon.New a cold start runs (model, sounds, hotkey), which is
+	// exactly what that budget was sized for.
+	for range 150 {
+		time.Sleep(100 * time.Millisecond)
+		pid, running := daemonRunning()
+		if !running {
+			sawGone = true
+			continue
+		}
+		if sawGone {
+			spin.Done(fmt.Sprintf("%s applied %s (pid %d)", ok("✓"), what, pid))
+			return nil
+		}
+	}
+	lp, _ := config.LogPath()
+	if sawGone {
+		return fmt.Errorf("FlowLite did not come back after applying %s — see %s", what, shortenHome(lp))
+	}
+	return fmt.Errorf("timed out waiting to apply %s — see %s", what, shortenHome(lp))
 }
 
 var reloadCmd = &cobra.Command{

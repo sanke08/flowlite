@@ -45,6 +45,12 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   failure instead of giving up silently, and the reload pauses just long
   enough after closing the old device for the teardown to finish before
   opening the new one.
+- **Applying settings or an update said "applying…" and handed the prompt
+  back before FlowLite had actually reloaded.** Signalling the reload was
+  instant; the model, sounds and hotkey coming back was not, so trying
+  FlowLite in that window looked like it was broken. `settings`, `update` and
+  `reload` now wait for the daemon to actually come back and confirm it
+  before returning.
 
 ### Added
 - **FlowLite always runs in the background now.** `flowlite` starts it and
