@@ -9,8 +9,10 @@
 // Success and cancel draw nothing new: the pill simply fades out.
 //
 // The pill sits centred on one edge of the screen (bottom by default, or top,
-// left, right), EDGE_GAP points in from the *physical* edge — so at the bottom
-// it overlaps the Dock area on purpose. On the left/right edges the capsule
+// left, right). At the bottom it sits EDGE_GAP points in from the *physical*
+// edge, so it overlaps the Dock area on purpose. At the top it clears the menu
+// bar and the camera notch first, then the same gap. Left and right sit flush
+// against the side, with no gap at all. On the left/right edges the capsule
 // stands upright and the bars run horizontally, stacked top to bottom.
 // Every transition is time-based and eased, so it reads as one continuous
 // object changing shape.
@@ -32,6 +34,9 @@ enum { POS_BOTTOM, POS_TOP, POS_LEFT, POS_RIGHT };
 
 static int position = POS_BOTTOM;
 static BOOL vertical(void) { return position == POS_LEFT || position == POS_RIGHT; }
+// Left and right sit flush against the side of the screen; top and bottom keep
+// the gap, which is what lets the bottom pill ride over the Dock.
+static double edgeGap(void) { return vertical() ? 0.0 : EDGE_GAP; }
 
 static double now_s(void) { return CACurrentMediaTime(); }
 static double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
@@ -139,6 +144,58 @@ static double      hideAt  = 0;   // >0 while fading out (may be in the future)
 static NSPoint     baseOrigin;
 static NSPoint     inward;        // unit vector pointing away from the screen edge
 
+static double      checkAt = 0;   // >0: verify the Space assignment at this time
+
+// The traits that make the pill a passive overlay on every Space. Re-applied
+// to every panel we build, and re-asserted each time the pill is shown.
+static void applyTraits(NSPanel *p) {
+    [p setLevel:NSStatusWindowLevel];
+    [p setOpaque:NO];
+    [p setBackgroundColor:[NSColor clearColor]];
+    [p setHasShadow:YES];
+    [p setIgnoresMouseEvents:YES];
+    [p setHidesOnDeactivate:NO];
+    [p setReleasedWhenClosed:NO];
+    [p setCollectionBehavior:(NSWindowCollectionBehaviorCanJoinAllSpaces
+                              | NSWindowCollectionBehaviorStationary
+                              | NSWindowCollectionBehaviorFullScreenAuxiliary)];
+}
+
+// Drop the window but keep the view: the pill's animation state lives in the
+// view, so a replacement window picks up mid-gesture without a flicker. The
+// timer is left alone — tick may be the caller.
+static void discardPanel(void) {
+    if (!panel) return;
+    [panel orderOut:nil];
+    [view removeFromSuperview];
+    panel = nil;
+}
+
+// A sleep/wake cycle or a display change can leave the window server holding a
+// stale Space assignment for the panel, and canJoinAllSpaces then stops
+// following the user — the pill draws at full alpha on a Space nobody is
+// looking at. Throw the window away while it is hidden; the next show builds a
+// fresh one, and a fresh window always lands on the active Space.
+static void installObservers(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+    installed = YES;
+    void (^refresh)(NSNotification *) = ^(NSNotification *n) {
+        (void)n;
+        if (!view || view->state == ST_HIDDEN) discardPanel();
+    };
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceDidWakeNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:refresh];
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSApplicationDidChangeScreenParametersNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:refresh];
+}
+
 static void ensurePanel(void) {
     if (panel) return;
     NSRect frame = NSMakeRect(0, 0, PILL_LONG, PILL_SHORT);
@@ -146,17 +203,20 @@ static void ensurePanel(void) {
                                        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
                                          backing:NSBackingStoreBuffered
                                            defer:NO];
-    [panel setLevel:NSStatusWindowLevel];
-    [panel setOpaque:NO];
-    [panel setBackgroundColor:[NSColor clearColor]];
-    [panel setHasShadow:YES];
-    [panel setIgnoresMouseEvents:YES];
-    [panel setHidesOnDeactivate:NO];
-    [panel setCollectionBehavior:(NSWindowCollectionBehaviorCanJoinAllSpaces
-                                  | NSWindowCollectionBehaviorStationary
-                                  | NSWindowCollectionBehaviorFullScreenAuxiliary)];
-    view = [[FLPillView alloc] initWithFrame:frame];
+    applyTraits(panel);
+    if (!view) view = [[FLPillView alloc] initWithFrame:frame];
     [panel setContentView:view];
+    installObservers();
+}
+
+// How far down the top of the screen is unusable. On a Mac with a camera
+// notch the top centre is exactly where the housing sits — and the pill is
+// centred, so it would land right behind it. The menu bar and the notch are
+// usually the same height, but the menu bar can be set to auto-hide while the
+// notch is physical and never goes away, so take whichever reaches further.
+static double topInset(NSScreen *s) {
+    double menuBar = NSMaxY([s frame]) - NSMaxY([s visibleFrame]);
+    return fmax(menuBar, [s safeAreaInsets].top);
 }
 
 // Centred on the chosen edge of whichever screen holds the mouse, EDGE_GAP
@@ -172,23 +232,34 @@ static void reposition(void) {
     double h = vertical() ? PILL_LONG : PILL_SHORT;
     switch (position) {
         case POS_TOP:
-            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMaxY(sf) - EDGE_GAP - h);
+            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMaxY(sf) - topInset(target) - edgeGap() - h);
             inward = NSMakePoint(0, -1);
             break;
         case POS_LEFT:
-            baseOrigin = NSMakePoint(NSMinX(sf) + EDGE_GAP, NSMidY(sf) - h / 2);
+            baseOrigin = NSMakePoint(NSMinX(sf) + edgeGap(), NSMidY(sf) - h / 2);
             inward = NSMakePoint(1, 0);
             break;
         case POS_RIGHT:
-            baseOrigin = NSMakePoint(NSMaxX(sf) - EDGE_GAP - w, NSMidY(sf) - h / 2);
+            baseOrigin = NSMakePoint(NSMaxX(sf) - edgeGap() - w, NSMidY(sf) - h / 2);
             inward = NSMakePoint(-1, 0);
             break;
         default:
-            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMinY(sf) + EDGE_GAP);
+            baseOrigin = NSMakePoint(NSMidX(sf) - w / 2, NSMinY(sf) + edgeGap());
             inward = NSMakePoint(0, 1);
             break;
     }
     [panel setFrame:NSMakeRect(baseOrigin.x, baseOrigin.y, w, h) display:NO];
+}
+
+// Replace a window the window server has stranded on the wrong Space,
+// carrying the current alpha and the view across so the pill just keeps going.
+static void rebuildPanel(void) {
+    double alpha = panel ? [panel alphaValue] : 0;
+    discardPanel();
+    ensurePanel();
+    reposition();
+    [panel setAlphaValue:alpha];
+    [panel orderFrontRegardless];
 }
 
 static void stopTimer(void) {
@@ -199,6 +270,12 @@ static void stopTimer(void) {
 
 static void tick(void) {
     double t = now_s();
+    // Shortly after a show, make sure the window really did land where the
+    // user is looking. If it did not, a fresh one will.
+    if (checkAt > 0 && t >= checkAt) {
+        checkAt = 0;
+        if (panel && ![panel isOnActiveSpace]) rebuildPanel();
+    }
     if (view->state == ST_ERROR && hideAt == 0 && t - view->stateAt >= ERROR_HOLD) hideAt = t;
 
     double alpha = easeOut((t - shownAt) / FADE_IN);
@@ -211,6 +288,7 @@ static void tick(void) {
             [panel orderOut:nil];
             view->state = ST_HIDDEN;
             hideAt = 0;
+            checkAt = 0;
             stopTimer();
             return;
         }
@@ -259,8 +337,10 @@ void flowlite_overlay_show(int state, const char *text) {
             view->red = view->shimmer = 0;
             for (int i = 0; i < BARS; i++) view->bars[i] = 0;
             reposition();
+            applyTraits(panel);
             [panel setAlphaValue:0];
             [panel orderFrontRegardless];
+            checkAt = t + 0.12;
         }
         startTimer();
         [view setNeedsDisplay:YES];

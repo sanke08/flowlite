@@ -27,7 +27,7 @@ LDFLAGS    = -s -w \
 # `make install` needs no sudo there.
 PREFIX   ?= $(shell test -w /opt/homebrew/bin && echo /opt/homebrew || echo /usr/local)
 
-.PHONY: all build test install uninstall clean deps windows whisper-static release publish
+.PHONY: all build test install uninstall clean deps windows whisper-static release publish dev run restart
 
 all: build
 
@@ -46,6 +46,25 @@ install: release ## Install the self-contained binary to $(PREFIX)/bin
 	install -d $(PREFIX)/bin
 	install -m 0755 $(RELEASE) $(PREFIX)/bin/$(BINARY)
 	@echo "installed $(PREFIX)/bin/$(BINARY) — run: flowlite"
+
+# ---- local testing -----------------------------------------------------------
+# The GitHub one-liner and `make install` write the same file — $(PREFIX)/bin/
+# $(BINARY) — so a local build replaces the downloaded one in place. There is
+# never a second copy for PATH to pick the wrong one from.
+
+dev: build       ## Fast loop: build, install, run in the FOREGROUND (Ctrl+C quits)
+	@install -d $(PREFIX)/bin
+	@install -m 0755 bin/$(BINARY) $(PREFIX)/bin/$(BINARY)
+	@echo "installed $(PREFIX)/bin/$(BINARY) ($(VERSION))"
+	-@$(PREFIX)/bin/$(BINARY) stop
+	@$(PREFIX)/bin/$(BINARY)
+
+run: install     ## The real release binary, installed and started in the background
+	@$(MAKE) --no-print-directory restart
+
+restart:         ## Stop the daemon if it is running, then start it again
+	-@$(PREFIX)/bin/$(BINARY) stop
+	@$(PREFIX)/bin/$(BINARY) start
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)
