@@ -302,10 +302,10 @@ func (d *Daemon) State() State { return d.getState() }
 
 // modifierHeld reports whether the history-panel chord's modifier is
 // currently down. Meaningless (and forced false) when the dictation hotkey
-// itself is Right Shift, since then "modifier held" would just mirror the
-// hotkey's own down-state and every hold would misfire as history.
+// itself includes Right Shift, since then "modifier held" would just mirror
+// the hotkey's own down-state and every hold would misfire as history.
 func (d *Daemon) modifierHeld() bool {
-	if d.cfg.Hotkey == "shift_r" {
+	if hotkey.Contains(d.cfg.Hotkey, "shift_r") {
 		return false
 	}
 	return hotkey.ModifierHeld()
@@ -511,6 +511,14 @@ func (d *Daemon) pasteLastNow(last history.Entry) {
 		// paste into whatever the user has switched to on their way out.
 		d.setState(Idle)
 		return
+	}
+
+	// The triple tap ends on the first chord key to let go; with a chord
+	// such as Fn+Control the other key can still be down, and a paste posted
+	// under it arrives as a different shortcut. Give the hand a moment to
+	// come off the keys.
+	for deadline := time.Now().Add(500 * time.Millisecond); !hotkey.AllUp() && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	label := "Pasted again"

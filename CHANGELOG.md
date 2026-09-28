@@ -5,6 +5,14 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
 ## [Unreleased]
 
+### Added
+- **Choose the dictation key by pressing it.** In `flowlite settings` (and
+  setup), "Dictation key" now listens: press one key or up to three held
+  together — Fn, Fn + Control, Right Command + Space, F5 — see it live, and
+  Enter saves it; Esc leaves it unchanged. Left-side modifiers and Fn are now
+  usable. A lone letter or other typing key is refused, since it would fire
+  while you type. Without Accessibility the old list is shown instead.
+
 ## [0.6.0] — 2026-09-06
 
 ### Added

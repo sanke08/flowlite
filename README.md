@@ -101,7 +101,9 @@ bar. If your connection drops, run `flowlite` again and it resumes.
 
 **3. "Dictation key"** — press **Enter** for **Right Option** (the `⌥` key to
 the right of your space bar). It does nothing on its own in macOS, which is
-exactly why it makes a good dictation key. You can change it later.
+exactly why it makes a good dictation key. To use a different one, press it
+first — any key, or up to three held together like **Fn + Control** — then
+Enter. You can change it later.
 
 When it finishes you'll see `✓ saved`. If the keyboard permission is not
 granted yet, FlowLite then prints the exact steps to grant it and stops —
@@ -238,7 +240,7 @@ keyboard permission. There is nothing to restart.
 | row | what it is |
 | --- | --- |
 | Speech model ⟳ | which Whisper model — see below |
-| Dictation key ⟳ | Right Option by default; also Right Control, Right Command, Right Shift, F13–F15 |
+| Dictation key ⟳ | Right Option by default. Press any key — or up to 3 held together, like Fn + Control — and Enter saves it |
 | Hold threshold ⟳ | how long a press must last to count as a hold rather than a tap (400 ms) |
 | Pill position ⟳ | bottom, top, left or right edge — with a live preview |
 | Microphone ⟳ | system default (follows AirPods and headsets), or a specific device |

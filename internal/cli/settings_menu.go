@@ -93,10 +93,10 @@ func runSettingsMenu(cmd *cobra.Command, args []string) error {
 	changed := false
 	for {
 		var pick menuItem
-		if err := huh.NewSelect[menuItem]().
+		if err := runPrompt(huh.NewSelect[menuItem]().
 			Title("What do you want to do?").
 			Options(menuOptions(cfg)...).
-			Value(&pick).Run(); err != nil {
+			Value(&pick)); err != nil {
 			if errors.Is(err, huh.ErrUserAborted) {
 				break
 			}
@@ -273,10 +273,10 @@ func changeModel(cfg *config.Config) (bool, error) {
 	if key == "" {
 		key = catalog.Default().Key
 	}
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Speech model").
 		Description("FlowLite keeps one model on disk: choosing another downloads it, then removes the current one.").
-		Options(opts...).Value(&key).Run(); err != nil {
+		Options(opts...).Value(&key)); err != nil {
 		return false, err
 	}
 	m, _ := catalog.Get(key)
@@ -289,22 +289,18 @@ func changeModel(cfg *config.Config) (bool, error) {
 }
 
 func changeKey(cfg *config.Config) (bool, error) {
-	opts := make([]huh.Option[string], 0)
-	for _, n := range hotkey.Names() {
-		opts = append(opts, huh.NewOption(fmt.Sprintf("%-16s %s", hotkey.Label(n), dim(n)), n))
-	}
-	key := cfg.Hotkey
-	if err := huh.NewSelect[string]().
-		Title("Dictation key").
-		Description("Hold to talk · double-tap for hands-free, press again to stop · triple-tap pastes your last transcript · Esc cancels.").
-		Options(opts...).Value(&key).Run(); err != nil {
+	key, err := chooseKey(cfg.Hotkey)
+	if err != nil {
 		return false, err
 	}
 	if key == cfg.Hotkey {
+		fmt.Println(dim("  unchanged"))
 		return false, nil
 	}
 	cfg.Hotkey = key
-	return save(cfg, "dictation key", hotkey.Label(key))
+	changed, err := save(cfg, "dictation key", hotkey.Label(key))
+	printKeyAdvice(key)
+	return changed, err
 }
 
 const (
@@ -327,11 +323,11 @@ func validHold(s string) error {
 
 func changeThreshold(cfg *config.Config) (bool, error) {
 	val := strconv.Itoa(cfg.HoldThresholdMS)
-	if err := huh.NewInput().
+	if err := runPrompt(huh.NewInput().
 		Title("Hold threshold (ms)").
 		Description(fmt.Sprintf("A press shorter than this is a tap, longer is a hold. %d–%d; the default 400 suits most people.", minHoldMS, maxHoldMS)).
 		Validate(validHold).
-		Value(&val).Run(); err != nil {
+		Value(&val)); err != nil {
 		return false, err
 	}
 	n, _ := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(val), "ms")))
@@ -368,11 +364,11 @@ func parseHandsFreeSilence(s string) (float64, error) {
 
 func changeHandsFreeStop(cfg *config.Config) (bool, error) {
 	val := strconv.FormatFloat(cfg.HandsFreeSilenceSeconds, 'f', -1, 64)
-	if err := huh.NewInput().
+	if err := runPrompt(huh.NewInput().
 		Title("Hands-free auto-stop (seconds of silence)").
 		Description(fmt.Sprintf("A hands-free recording stops itself after this much silence, as if you had tapped. 0 turns it off; the default %v suits most people. Hold-to-talk is never affected.", config.DefaultHandsFreeSilenceSeconds)).
 		Validate(func(s string) error { _, err := parseHandsFreeSilence(s); return err }).
-		Value(&val).Run(); err != nil {
+		Value(&val)); err != nil {
 		return false, err
 	}
 	n, _ := parseHandsFreeSilence(val)
@@ -389,20 +385,20 @@ func changePill(cfg *config.Config) (bool, error) {
 		opts = append(opts, huh.NewOption(p, p))
 	}
 	pos := cfg.PillPosition
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Pill position").
 		Description("The screen edge the pill sits on, centred and 100 px in. On the left and right it stands upright.").
-		Options(opts...).Value(&pos).Run(); err != nil {
+		Options(opts...).Value(&pos)); err != nil {
 		return false, err
 	}
 	if !overlay.ValidPosition(pos) {
 		return false, nil
 	}
 	preview := true
-	if err := huh.NewConfirm().
+	if err := runPrompt(huh.NewConfirm().
 		Title("Preview?").
 		Description("Runs one pretend dictation at the " + pos + ": the pill, its animation and the sound cues.").
-		Affirmative("Yes").Negative("No").Value(&preview).Run(); err != nil {
+		Affirmative("Yes").Negative("No").Value(&preview)); err != nil {
 		return false, err
 	}
 	if preview {
@@ -433,10 +429,10 @@ func changeMic(cfg *config.Config) (bool, error) {
 		opts = append(opts, huh.NewOption(label, d.Name))
 	}
 	dev := cfg.InputDevice
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Microphone").
 		Description("\"system default\" follows whatever macOS has selected, so AirPods and headsets just work.").
-		Options(opts...).Value(&dev).Run(); err != nil {
+		Options(opts...).Value(&dev)); err != nil {
 		return false, err
 	}
 	if dev == cfg.InputDevice {
@@ -454,20 +450,20 @@ func changeLanguage(cfg *config.Config) (bool, error) {
 	}
 	opts = append(opts, huh.NewOption("Other… (type a code)", other))
 	lang := cfg.Language
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Language").
 		Description("Fixing the language skips detection and helps with short phrases. English-only models ignore this.").
-		Options(opts...).Value(&lang).Run(); err != nil {
+		Options(opts...).Value(&lang)); err != nil {
 		return false, err
 	}
 	if lang == other {
 		lang = cfg.Language
-		if err := huh.NewInput().
+		if err := runPrompt(huh.NewInput().
 			Title("Language code").
 			Description("An ISO 639 code whisper.cpp knows: nl, sv, tr, pl, uk, ta, bn…  Empty means auto-detect.").
 			Placeholder("nl").
 			Validate(validLanguage).
-			Value(&lang).Run(); err != nil {
+			Value(&lang)); err != nil {
 			return false, err
 		}
 		lang = strings.ToLower(strings.TrimSpace(lang))
@@ -502,14 +498,14 @@ func validLanguage(s string) error {
 func changeSounds(cfg *config.Config) (bool, error) {
 	const play = "play"
 	choice := onOff(cfg.Sounds)
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Sounds").
 		Description("A short cue when recording starts, stops, pastes or fails.").
 		Options(
 			huh.NewOption("On", "on"),
 			huh.NewOption("Off", "off"),
 			huh.NewOption("Play the cues", play),
-		).Value(&choice).Run(); err != nil {
+		).Value(&choice)); err != nil {
 		return false, err
 	}
 	if choice == play {
@@ -528,13 +524,13 @@ func changeSounds(cfg *config.Config) (bool, error) {
 
 func changeHistoryEnabled(cfg *config.Config) (bool, error) {
 	choice := onOff(cfg.HistoryEnabled)
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Remember transcripts").
 		Description("Keeps recent transcripts so a triple-tap or \"Recent transcripts\" can recover one. Off means nothing new is recorded from here on — existing history stays until cleared.").
 		Options(
 			huh.NewOption("On", "on"),
 			huh.NewOption("Off", "off"),
-		).Value(&choice).Run(); err != nil {
+		).Value(&choice)); err != nil {
 		return false, err
 	}
 	on := choice == "on"
@@ -547,13 +543,13 @@ func changeHistoryEnabled(cfg *config.Config) (bool, error) {
 
 func changeUpdateRestart(cfg *config.Config) (bool, error) {
 	choice := onOff(cfg.UpdateRestart)
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Restart for updates").
 		Description("Lets `flowlite update` stop the running FlowLite (after any transcription in flight), swap in the new version and start it again. Windows locks a running .exe, so with this Off an update is downloaded but left for you to move into place by hand.").
 		Options(
 			huh.NewOption("On", "on"),
 			huh.NewOption("Off", "off"),
-		).Value(&choice).Run(); err != nil {
+		).Value(&choice)); err != nil {
 		return false, err
 	}
 	on := choice == "on"
@@ -595,18 +591,18 @@ func copyTranscript(cfg *config.Config) error {
 	opts = append(opts, huh.NewOption(warn("Clear all history"), clearAll))
 	opts = append(opts, huh.NewOption(dim("← back"), -1))
 	pick := 0
-	if err := huh.NewSelect[int]().
+	if err := runPrompt(huh.NewSelect[int]().
 		Title("Recent transcripts").
 		Description("Pick one to copy it.").
-		Options(opts...).Value(&pick).Run(); err != nil {
+		Options(opts...).Value(&pick)); err != nil {
 		return err
 	}
 	if pick == clearAll {
 		confirm := false
-		if err := huh.NewConfirm().
+		if err := runPrompt(huh.NewConfirm().
 			Title("Clear all history?").
 			Description("Permanently erases every remembered transcript. This cannot be undone.").
-			Affirmative("Clear").Negative("Keep").Value(&confirm).Run(); err != nil {
+			Affirmative("Clear").Negative("Keep").Value(&confirm)); err != nil {
 			return err
 		}
 		if !confirm {
@@ -661,10 +657,10 @@ func daemonMenu() (menuResult, error) {
 	}
 	opts = append(opts, huh.NewOption(dim("← back"), actBack))
 	act := opts[0].Value
-	if err := huh.NewSelect[string]().
+	if err := runPrompt(huh.NewSelect[string]().
 		Title("Background daemon · " + daemonStatus()).
 		Description(desc).
-		Options(opts...).Value(&act).Run(); err != nil {
+		Options(opts...).Value(&act)); err != nil {
 		return resNothing, err
 	}
 	switch act {
@@ -691,10 +687,10 @@ func daemonMenu() (menuResult, error) {
 // 547 MB download.
 func resetDefaults(cfg *config.Config) (bool, error) {
 	confirm := false
-	if err := huh.NewConfirm().
+	if err := runPrompt(huh.NewConfirm().
 		Title("Reset every setting to its default?").
 		Description("Key, hold threshold, pill position, microphone, language and sounds go back to how they shipped. The speech model on disk is kept.").
-		Affirmative("Reset").Negative("Keep").Value(&confirm).Run(); err != nil {
+		Affirmative("Reset").Negative("Keep").Value(&confirm)); err != nil {
 		return false, err
 	}
 	if !confirm {

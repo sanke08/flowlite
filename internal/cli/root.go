@@ -195,10 +195,10 @@ func configured(cfg *config.Config) bool {
 // PATH if the user agrees. Declining is fine; nothing else depends on it.
 func offerInstall() error {
 	doInstall := true
-	if err := huh.NewConfirm().
+	if err := runPrompt(huh.NewConfirm().
 		Title("Install flowlite so it works from any terminal?").
 		Description("Copies this file to " + installDir()).
-		Affirmative("Yes").Negative("Skip").Value(&doInstall).Run(); err != nil {
+		Affirmative("Yes").Negative("Skip").Value(&doInstall)); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
 			return nil
 		}
