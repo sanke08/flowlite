@@ -26,7 +26,7 @@ Four commands cover everyday use:
 | `flowlite update` | get the latest version |
 
 Three more exist when you need them: `flowlite start` and `flowlite stop` run it
-detached from the terminal, and `flowlite uninstall` removes it. (`flowlite
+in the background, independent of any terminal, and `flowlite uninstall` removes it. (`flowlite
 reload` is there too, but you should never need it — settings and updates apply
 themselves.)
 
@@ -92,8 +92,9 @@ it has no model yet. It asks three things:
 
 **1. "Open the macOS Accessibility prompt now?"** — choose **Yes**.
 macOS opens a small dialog. Click **Open System Settings**. In the list that
-appears, switch on **Terminal**. This is explained in Step 3; it is the one
-step people skip, and without it nothing works.
+appears, switch on **flowlite**. macOS may also ask about the microphone —
+allow it. This is explained in Step 3; it is the one step people skip, and
+without it nothing works.
 
 **2. "Speech model"** — press **Enter** to take the recommended one
 (*Large v3 Turbo, compressed*, 547 MB). It downloads now; you'll see a progress
@@ -118,21 +119,28 @@ macOS only allows that for programs you explicitly approve under
 **Accessibility**. Without it, pressing the key does nothing — no error, no
 sound, nothing. This is by far the most common reason "it doesn't work".
 
-If you said Yes in the wizard, Terminal is already in the list. Make sure its
-switch is **on**:
+If you said Yes in the wizard, **flowlite** is already in the list. Make sure
+its switch is **on**:
 
-> **System Settings → Privacy & Security → Accessibility → Terminal → on**
+> **System Settings → Privacy & Security → Accessibility → flowlite → on**
 
-Then **quit and reopen Terminal** — macOS only re-checks the permission when
-the app starts.
+Then run `flowlite start`. There is no need to reopen your terminal.
 
-Two details worth knowing:
+Three details worth knowing:
 
-- The permission is granted to **Terminal** (the app you ran FlowLite from),
-  not to FlowLite itself. That's why the list says Terminal. Grant it once and
-  it stays granted, even when FlowLite updates.
-- If you use **iTerm**, **Warp** or another terminal, that app is the one to
-  switch on. `flowlite doctor` tells you exactly which.
+- The permission is granted to **flowlite itself**, not to Terminal. FlowLite
+  runs in the background on its own (macOS's launchd starts it), not inside
+  your terminal — which is why quitting Terminal does not stop it, and why it
+  works the same from Terminal, iTerm, Warp or anything else.
+- The microphone works the same way: allow **flowlite** under
+  **Privacy & Security → Microphone** when macOS asks.
+- macOS ties the grant to the exact program file. After an update (or a
+  rebuild), if the key stops doing anything, `flowlite doctor` says so — switch
+  **flowlite** off and on again in the Accessibility list, then
+  `flowlite start`.
+
+Your terminal only needs Accessibility for one thing: choosing a dictation key
+by *pressing* it in `flowlite settings`. Picking from the list works without it.
 
 Check it worked:
 
@@ -192,8 +200,9 @@ transcripts in the terminal instead.
 **`flowlite` once, then dictate.** That is the whole loop.
 
 FlowLite runs in the background. `flowlite` starts it and hands your terminal
-straight back — you can close the window, and it keeps listening. Closing the
-terminal or pressing Ctrl+C in it does not stop it, because by then dictation
+straight back — you can close the window, or quit Terminal entirely, and it
+keeps listening until you log out. Closing or quitting the terminal or
+pressing Ctrl+C in it does not stop it, because by then dictation
 is part of how you type and losing it by accident would be worse than useless.
 
 ```bash
@@ -301,16 +310,19 @@ How releases are cut is under [Versioning and releases](#versioning-and-releases
 
 Start with `flowlite doctor`: it checks the engine, model, microphone,
 clipboard, config directory and — the one that matters — the keyboard
-permission, and prints the fix for anything that fails.
+permission, and prints the fix for anything that fails. The permissions it
+checks are flowlite's own, exactly as the background daemon sees them;
+`flowlite doctor --request` also shows the macOS prompts.
 
 **I tapped the key once and nothing happened.**
 That's by design: a single tap does nothing, so an accidental brush of the key
 never starts a recording. **Hold** it to talk, or **double-tap** for hands-free.
 
 **I press the key and nothing happens at all — not even when holding.**
-Accessibility isn't granted. Run `flowlite doctor` — it names the app to switch
-on. After switching it on, **quit and reopen Terminal**, then `flowlite`
-again. macOS only re-checks the permission when the app starts.
+Accessibility isn't granted to **flowlite**. Run `flowlite doctor` to confirm,
+switch **flowlite** on under **System Settings → Privacy & Security →
+Accessibility** (if it is already on after an update, switch it off and on
+again), then `flowlite start`.
 
 **Terminal says `zsh: killed` or the file "cannot be opened".**
 That's macOS quarantine on a browser-downloaded file. Use the `curl` install
@@ -339,7 +351,8 @@ Left over from before the one-model rule. Re-choose your model under
 `flowlite settings → Test microphone` records 4 seconds and prints the
 transcript, which isolates the microphone from everything else; the
 Microphone row shows every device macOS sees. macOS asks for microphone
-permission the first time; grant it to Terminal.
+permission the first time; grant it to **flowlite** (`flowlite doctor` shows
+whether it has it, and `flowlite doctor --request` asks again).
 
 **`flowlite` says it is already listening, but I can't find it.**
 It is running in the background. `flowlite settings → Background daemon → Stop`.
@@ -358,7 +371,8 @@ flowlite settings
 
 Choose **Uninstall FlowLite** and type `yes`. It removes the model, your
 settings and transcript history, and the program. Nothing else was ever
-installed. Then remove Terminal from Accessibility if you like.
+installed. Then remove flowlite from Accessibility and Microphone in
+System Settings if you like.
 
 ---
 
@@ -420,10 +434,12 @@ starts it again in the background, then prints the `tail -f` command for the
 log so you can watch what it does.
 
 One thing to expect: every rebuild changes the binary, and macOS ties the
-Accessibility grant to the binary it was given to. So a fresh build can find
-itself without keyboard access and say so on startup — `flowlite doctor` will
-tell you, and you re-allow it in **System Settings → Privacy & Security →
-Accessibility**.
+Accessibility and microphone grants to the binary they were given to. So a
+fresh build can find itself without keyboard access — `flowlite start` stops
+and says so, `flowlite doctor` confirms it, and you switch **flowlite** off and
+on again in **System Settings → Privacy & Security → Accessibility**. The
+binary carries an embedded Info.plist (`packaging/macos/Info.plist`) so macOS
+can ask for the microphone on its behalf.
 
 ```bash
 make run       # full static release build, installed and started in background

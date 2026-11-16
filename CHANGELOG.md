@@ -13,6 +13,18 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   usable. A lone letter or other typing key is refused, since it would fire
   while you type. Without Accessibility the old list is shown instead.
 
+### Fixed
+- **Quitting Terminal no longer stops FlowLite.** On macOS the background
+  daemon is now started by launchd rather than by your terminal, so closing
+  or quitting Terminal (or any other app) leaves it listening until
+  `flowlite stop`, logout or a reboot.
+- `flowlite doctor`, `flowlite start` and the setup wizard now check
+  Accessibility and the microphone for **flowlite itself** — what the
+  background daemon actually runs as — instead of the terminal. One-time
+  change: switch on **flowlite** under Privacy & Security → Accessibility and
+  allow it the microphone. The binary now embeds an Info.plist so macOS can
+  ask for the microphone on its behalf.
+
 ## [0.6.0] — 2026-09-06
 
 ### Added

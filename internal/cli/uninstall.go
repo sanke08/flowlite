@@ -65,6 +65,7 @@ func uninstallFlowLite() (bool, error) {
 			return false, fmt.Errorf("%w — stop it first: flowlite stop", err)
 		}
 	}
+	removeDaemonJob()
 	if err := os.RemoveAll(dir); err != nil {
 		return false, err
 	}

@@ -123,14 +123,31 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fail("disk", fmt.Sprintf("%d models installed (%s) — FlowLite keeps one; re-choose yours under flowlite settings → Speech model", len(inst), names))
 	}
 
+	// -- permissions, as the background daemon sees them ------------------
+	// On macOS the daemon runs under launchd, so macOS judges flowlite
+	// itself, not this terminal: ask from there (see ownPermissions). With
+	// --request this also shows the prompts.
+	what := "checking flowlite's permissions…"
+	if doctorRequest {
+		what = "asking macOS for Accessibility and the microphone…"
+	}
+	check("permissions", what)
+	ownAX, ownMic, permErr := ownPermissions(doctorRequest)
+	spin.Stop()
+	if permErr != nil {
+		fail("permissions", permErr.Error())
+	}
+
 	// -- microphone -------------------------------------------------------
 	// The permission first: listing devices does not need it, and neither does
 	// opening one, so without this check every line below can pass while the
 	// microphone delivers nothing but silence.
-	if st := permissions.Mic(); !st.OK() {
-		fail("microphone access", st.Hint())
-	} else {
-		pass("microphone access", "granted")
+	if permErr == nil {
+		if !ownMic.OK() {
+			fail("microphone access", ownMic.Hint())
+		} else {
+			pass("microphone access", "granted to "+daemonApp())
+		}
 	}
 
 	check("microphone", "listing audio devices…")
@@ -180,18 +197,21 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// -- keyboard permission (the one that actually bites) ---------------
-	if permissions.Needed() {
-		if doctorRequest && !permissions.Trusted() {
-			check("keyboard", "asking macOS for Accessibility…")
-			permissions.Request()
-			time.Sleep(300 * time.Millisecond)
-			spin.Stop()
-		}
-		if permissions.Trusted() {
-			pass("keyboard", "Accessibility granted to "+hostApp())
+	if permissions.Needed() && permErr == nil {
+		if ownAX {
+			pass("keyboard", "Accessibility granted to "+daemonApp())
 		} else {
-			fail("keyboard", bad("Accessibility is NOT granted to "+hostApp()))
+			fail("keyboard", bad("Accessibility is NOT granted to "+daemonApp()))
 			printAccessibilityFix(doctorRequest)
+		}
+		// The terminal's own grant no longer matters for dictation; it only
+		// lets `flowlite settings` detect a key you press to choose it.
+		if runtime.GOOS == "darwin" {
+			if permissions.Trusted() {
+				info("terminal", dim(hostApp()+" has Accessibility too — settings can pick a key by pressing it"))
+			} else {
+				info("terminal", dim(hostApp()+" has no Accessibility — fine; only needed to pick a key by pressing it in settings"))
+			}
 		}
 	}
 
@@ -205,7 +225,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 }
 
 func init() {
-	doctorCmd.Flags().BoolVar(&doctorRequest, "request", false, "trigger the macOS Accessibility prompt")
+	doctorCmd.Flags().BoolVar(&doctorRequest, "request", false, "show the macOS Accessibility and microphone prompts for flowlite")
 	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "also load the model and report the GPU")
 	rootCmd.AddCommand(doctorCmd)
 }

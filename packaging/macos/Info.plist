@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the flowlite binary (__TEXT,__info_plist) by the Makefile.
+  The background daemon runs under launchd, so macOS asks about the
+  microphone for flowlite itself, and needs a usage string to show.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.sanke08.flowlite</string>
+	<key>CFBundleName</key>
+	<string>FlowLite</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>FlowLite listens while you hold the dictation key and turns your speech into text.</string>
+</dict>
+</plist>

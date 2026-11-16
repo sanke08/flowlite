@@ -30,10 +30,10 @@ func (m MicStatus) String() string {
 func (m MicStatus) Hint() string {
 	switch m {
 	case MicDenied:
-		return "microphone access was denied — System Settings → Privacy & Security → Microphone, switch on your terminal (or FlowLite), then restart it"
+		return "microphone access was denied — System Settings → Privacy & Security → Microphone, switch on flowlite, then run: flowlite start"
 	case MicRestricted:
 		return "microphone access is blocked by a policy on this Mac (Screen Time or an MDM profile)"
 	default:
-		return "microphone access has not been granted yet — run `flowlite` once and allow it when macOS asks"
+		return "microphone access has not been granted yet — run `flowlite doctor --request` and allow it when macOS asks"
 	}
 }

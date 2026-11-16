@@ -22,20 +22,24 @@ func runSetup(cfg *config.Config) error {
 	fmt.Println()
 
 	// 1. Keyboard permission — the step everyone misses, so it comes first.
-	if permissions.Needed() && !permissions.Trusted() {
-		fmt.Println(warn("macOS is not letting " + hostApp() + " see the keyboard yet."))
-		fmt.Println(dim("  Without this the dictation key does nothing at all."))
-		ask := true
-		if err := runPrompt(huh.NewConfirm().
-			Title("Open the macOS Accessibility prompt now?").
-			Description("It adds " + hostApp() + " to Privacy & Security → Accessibility; you then switch it on.").
-			Affirmative("Yes, open it").Negative("Later").Value(&ask)); err != nil {
-			return err
-		}
-		if ask {
-			permissions.Request()
-			fmt.Println(dim("  → switch on " + hostApp() + " in the window that opened, then come back here."))
-			fmt.Println()
+	// FlowLite runs in the background as flowlite itself, so that is what
+	// macOS has to allow — not this terminal.
+	if permissions.Needed() {
+		if ax, _, err := ownPermissions(false); err == nil && !ax {
+			fmt.Println(warn("macOS is not letting " + daemonApp() + " see the keyboard yet."))
+			fmt.Println(dim("  Without this the dictation key does nothing at all."))
+			ask := true
+			if err := runPrompt(huh.NewConfirm().
+				Title("Open the macOS Accessibility prompt now?").
+				Description("It adds " + daemonApp() + " to Privacy & Security → Accessibility; you then switch it on. macOS may also ask about the microphone.").
+				Affirmative("Yes, open it").Negative("Later").Value(&ask)); err != nil {
+				return err
+			}
+			if ask {
+				_, _, _ = ownPermissions(true)
+				fmt.Println(dim("  → switch on " + daemonApp() + " in the window that opened, then come back here."))
+				fmt.Println()
+			}
 		}
 	}
 

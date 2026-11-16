@@ -58,6 +58,8 @@ var (
 	rootHistOut     string // PNG path for --history-preview's snapshot ("" = none)
 	rootHistQuery   string // search text to type into the panel before the snapshot
 	rootPlayCues    bool   // play the six audio cues, then exit
+	rootPermCheck   string // report this process's own permissions into this file
+	rootPermCheckRq bool   // with --perm-check, show the macOS prompts first
 	rootNoPaste     bool   // user-facing: print transcripts instead of pasting
 )
 
@@ -116,6 +118,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if rootPlayCues {
 		return playCues()
 	}
+	if rootPermCheck != "" {
+		return runPermCheck(rootPermCheck, rootPermCheckRq)
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -152,9 +157,24 @@ func runRoot(cmd *cobra.Command, args []string) error {
 
 	// 3. Keyboard permission missing: say exactly what to do and stop. A
 	// daemon that cannot see the keyboard is only a support ticket.
-	if permissions.Needed() && !permissions.Trusted() {
+	// The background daemon's own grant is checked by startBackground; here
+	// only the processes that run in this very process are: the daemon itself,
+	// and --no-paste, which runs in (and is judged as) the terminal.
+	if (rootDaemon || rootNoPaste) && permissions.Needed() && !permissions.Trusted() {
+		if rootDaemon && os.Getenv(launchdEnv) == "1" {
+			// launchd started this daemon, so macOS asks about flowlite
+			// itself, not the terminal. Requesting adds it to the
+			// Accessibility list so the user only has to flip the switch.
+			// This lands in the log, which `flowlite start` prints.
+			permissions.Request()
+			exe, _ := os.Executable()
+			return fmt.Errorf("Accessibility is not granted to flowlite (%s).\n"+
+				"       Turn it on in System Settings → Privacy & Security → Accessibility,\n"+
+				"       then run: flowlite start", exe)
+		}
 		fmt.Println(bad("Accessibility is NOT granted to " + hostApp() + "."))
-		printAccessibilityFix(false)
+		fmt.Println(dim("  --no-paste runs inside this terminal, so macOS judges " + hostApp() + ":"))
+		fmt.Println(dim("  System Settings → Privacy & Security → Accessibility → switch on " + hostApp() + ", then reopen it."))
 		return errSilent
 	}
 
@@ -221,23 +241,37 @@ func offerInstall() error {
 }
 
 // printAccessibilityFix prints the numbered steps that get the keyboard
-// permission granted. requested is true when the macOS prompt was just
-// triggered, so step 1 reads as done.
+// permission granted to flowlite — the app macOS judges for the background
+// daemon. requested is true when the macOS prompt was just triggered, so
+// step 1 reads as done.
 func printAccessibilityFix(requested bool) {
+	app := daemonApp()
 	fmt.Println()
 	fmt.Println("     Without it macOS never delivers the dictation key to FlowLite, so")
 	fmt.Println("     pressing it does nothing at all. This is the step most people miss.")
 	fmt.Println()
 	if !requested {
-		fmt.Println("       1.", blue("flowlite doctor --request"), dim("— opens the macOS prompt and adds "+hostApp()+" to the list"))
+		fmt.Println("       1.", blue("flowlite doctor --request"), dim("— opens the macOS prompt and adds "+app+" to the list"))
 	} else {
-		fmt.Println("       1.", dim("a macOS prompt should have appeared; it added "+hostApp()+" to the list"))
+		fmt.Println("       1.", dim("a macOS prompt should have appeared; it added "+app+" to the list"))
 	}
-	fmt.Println("       2. System Settings → Privacy & Security → Accessibility → switch on", bold(hostApp()))
-	fmt.Println("       3. quit and reopen", bold(hostApp())+", then run:", blue("flowlite"), dim("(flowlite doctor confirms it)"))
+	fmt.Println("       2. System Settings → Privacy & Security → Accessibility → switch on", bold(app))
+	fmt.Println("       3. run:", blue("flowlite start"), dim("(flowlite doctor confirms it)"))
 	fmt.Println()
-	fmt.Println(dim("     The permission attaches to " + hostApp() + " — the app that launched flowlite —"))
-	fmt.Println(dim("     not to the flowlite binary, so it survives every update."))
+	if runtime.GOOS == "darwin" {
+		fmt.Println(dim("     FlowLite runs in the background on its own, not inside your terminal, so"))
+		fmt.Println(dim("     the switch is for flowlite itself. macOS ties it to this exact build: after"))
+		fmt.Println(dim("     an update, if dictation stops, switch flowlite off and on again there."))
+	}
+}
+
+// daemonApp names what macOS judges the background daemon's permissions by:
+// on macOS flowlite itself (it runs under launchd), elsewhere this process.
+func daemonApp() string {
+	if runtime.GOOS == "darwin" {
+		return "flowlite"
+	}
+	return hostApp()
 }
 
 // hostApp names the application macOS attributes our permissions to: the
@@ -321,4 +355,8 @@ func init() {
 	_ = f.MarkHidden("history-preview-out")
 	_ = f.MarkHidden("history-preview-query")
 	_ = f.MarkHidden("play-cues")
+	f.StringVar(&rootPermCheck, "perm-check", "", "internal: write this process's Accessibility and microphone state to this file")
+	f.BoolVar(&rootPermCheckRq, "perm-check-request", false, "internal: with --perm-check, show the macOS prompts first")
+	_ = f.MarkHidden("perm-check")
+	_ = f.MarkHidden("perm-check-request")
 }

@@ -27,16 +27,27 @@ LDFLAGS    = -s -w \
 # `make install` needs no sudo there.
 PREFIX   ?= $(shell test -w /opt/homebrew/bin && echo /opt/homebrew || echo /usr/local)
 
-.PHONY: all build test install uninstall clean deps windows whisper-static release publish dev run restart
+.PHONY: infoplist all build test install uninstall clean deps windows whisper-static release publish dev run restart
 
 all: build
 
 deps:            ## Install native dependencies (macOS)
 	brew list whisper-cpp >/dev/null 2>&1 || brew install whisper-cpp
 
-build:           ## Build ./bin/flowlite
+# The Info.plist embedded in the binary: the launchd-run daemon asks for the
+# microphone as flowlite itself, which needs a usage string. Copied to a
+# space-free path first, since the linker flag cannot quote one.
+INFOPLIST     := $(HOME)/.cache/flowlite-Info.plist
+PLIST_LDFLAGS := -Wl,-sectcreate,__TEXT,__info_plist,$(INFOPLIST)
+
+infoplist:
+	@mkdir -p $(HOME)/.cache
+	@cp packaging/macos/Info.plist $(INFOPLIST)
+
+build: infoplist ## Build ./bin/flowlite
 	@mkdir -p bin
-	CGO_ENABLED=1 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/flowlite
+	CGO_ENABLED=1 CGO_LDFLAGS="-O2 -g $(PLIST_LDFLAGS)" go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/flowlite
+	@codesign --force --sign - --identifier com.sanke08.flowlite bin/$(BINARY) 2>/dev/null || true
 	@echo "built bin/$(BINARY) ($(VERSION))"
 
 test:            ## Unit tests (pure Go; no mic, model or permissions needed)
@@ -129,14 +140,14 @@ whisper-static:   ## Build whisper.cpp as static libs with Metal (needs cmake)
 	  cmake --build $(WCPP)/build -j )
 
 release: WHISPERV := $(WCPP_TAG)
-release: whisper-static   ## One shareable file: dist/flowlite-<version>-macos-arm64
+release: whisper-static infoplist   ## One shareable file: dist/flowlite-<version>-macos-arm64
 	@mkdir -p $(HOME)/.cache dist
 	@ln -sfn "$(CURDIR)/$(WCPP)" $(WCPP_LNK)
 	CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) \
 	CGO_CFLAGS="-mmacosx-version-min=$(MACOS_MIN) -I$(WCPP_LNK)/include -I$(WCPP_LNK)/ggml/include" \
-	CGO_LDFLAGS="-mmacosx-version-min=$(MACOS_MIN) $(STATIC_LIBS) -framework Metal -framework MetalKit -framework Foundation -framework Accelerate -lc++" \
+	CGO_LDFLAGS="-mmacosx-version-min=$(MACOS_MIN) $(STATIC_LIBS) -framework Metal -framework MetalKit -framework Foundation -framework Accelerate -lc++ $(PLIST_LDFLAGS)" \
 	go build -tags static -trimpath -ldflags '$(LDFLAGS)' -o $(RELEASE) ./cmd/flowlite
-	@codesign --force --sign - $(RELEASE) 2>/dev/null || true
+	@codesign --force --sign - --identifier com.sanke08.flowlite $(RELEASE) 2>/dev/null || true
 	@echo "release: $(RELEASE) ($$(du -h $(RELEASE) | cut -f1)), minimum macOS $$(otool -l $(RELEASE) | grep -A3 LC_BUILD_VERSION | awk '/minos/{print $$2}') — depends only on macOS system libraries:"
 	@otool -L $(RELEASE) | grep -vE "^dist|/usr/lib/|/System/" | sed 's/^/  UNEXPECTED: /' || true
 

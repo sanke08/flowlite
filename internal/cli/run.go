@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/sanke08/flowlite/internal/daemon"
 	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/mainloop"
+	"github.com/sanke08/flowlite/internal/permissions"
 	"github.com/sanke08/flowlite/internal/whisper"
 )
 
@@ -122,7 +122,7 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 			// `settings` reported "did not come back". The Accessibility
 			// grant follows the binary, not the pid, so a new detached
 			// process keeps it exactly as `flowlite` (start) does.
-			if _, err := spawnDaemon(); err != nil {
+			if err := spawnDaemon(); err != nil {
 				logger.Printf("reload failed: %v", err)
 			}
 			stop()
@@ -204,11 +204,23 @@ func startBackground() error {
 	if !configured(cfg) {
 		return errors.New("no model installed yet — run: flowlite")
 	}
-	c, err := spawnDaemon()
-	if err != nil {
-		return err
+	// The daemon is judged as flowlite itself, not this terminal, so check
+	// that grant before starting one that could never hear the key. Missing:
+	// show the macOS prompt (it adds flowlite to the list) and say what to do.
+	// If the check itself fails, start anyway; the daemon reports its own.
+	if permissions.Needed() {
+		if ax, _, err := ownPermissions(false); err == nil && !ax {
+			_, _, _ = ownPermissions(true)
+			fmt.Println(bad("Accessibility is NOT granted to " + daemonApp() + "."))
+			printAccessibilityFix(true)
+			return errSilent
+		}
 	}
 	lp, _ := config.LogPath()
+	logStart := fileSize(lp)
+	if err := spawnDaemon(); err != nil {
+		return err
+	}
 	// Give the model a moment to load so a failure shows up here. 45s: the
 	// same budget stopBackground and waitForReload give — this is the same
 	// daemon.New a cold start runs, which on a first run can block on the
@@ -216,40 +228,52 @@ func startBackground() error {
 	// (the README documents 15+ seconds for that alone).
 	spin := startSpinner("starting…")
 	defer spin.Stop()
-	for range 450 {
+	for i := range 450 {
 		time.Sleep(100 * time.Millisecond)
-		if _, running := daemonRunning(); running {
+		if pid, running := daemonRunning(); running {
 			spin.Stop()
-			printStartedBanner(cfg, c.Process.Pid, lp)
+			printStartedBanner(cfg, pid, lp)
 			return nil
 		}
+		// Every half second: has the daemon already given up? Then say why
+		// now instead of after the whole 45 seconds.
+		if i%5 == 4 && spawnedJobExited() {
+			break
+		}
+	}
+	spin.Stop()
+	if tail := logSince(lp, logStart); tail != "" {
+		fmt.Println(tail)
 	}
 	return fmt.Errorf("the daemon did not come up; see %s", shortenHome(lp))
 }
 
-// spawnDaemon starts `flowlite --daemon` as a detached process logging to
-// the log file, and returns without waiting for it. Shared by `flowlite`
-// (start) and by a background daemon reloading itself.
-func spawnDaemon() (*exec.Cmd, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, err
+func fileSize(p string) int64 {
+	if fi, err := os.Stat(p); err == nil {
+		return fi.Size()
 	}
-	lp, _ := config.LogPath()
-	logf, err := os.OpenFile(lp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	defer logf.Close() // the child holds its own descriptor after Start
-
-	c := exec.Command(exe, "--daemon")
-	c.Stdout, c.Stderr = logf, logf
-	detach(c)
-	if err := c.Start(); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return 0
 }
+
+// logSince returns the last few lines the log gained after offset — what a
+// daemon that failed to start wrote about why.
+func logSince(p string, offset int64) string {
+	b, err := os.ReadFile(p)
+	if err != nil || int64(len(b)) <= offset {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(b[offset:])), "\n")
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// launchdEnv marks a daemon that launchd started (macOS): a reload from
+// inside the job restarts the job instead of booting it out from under
+// itself, and a missing Accessibility grant is flowlite's own, not the
+// terminal's.
+const launchdEnv = "FLOWLITE_LAUNCHD"
 
 // errForcedStop is returned by stopBackground when the daemon ignored the
 // graceful stop for 45 s and had to be killed. The daemon is gone and the
@@ -482,7 +506,7 @@ func printStartedBanner(cfg *config.Config, pid int, logPath string) {
 	key := hotkey.Label(cfg.Hotkey)
 	fmt.Printf("%s %s   %s\n", ok("✓"), bold("FlowLite "+Version+" is listening"), dim(model+" · "+key+" · pid "+strconv.Itoa(pid)))
 	fmt.Printf("  hold %s to talk · double-tap for hands-free, tap to stop · triple-tap pastes your last transcript · Esc cancels\n", bold(key))
-	fmt.Println(dim("  it keeps running when you close this window —  flowlite stop  ends it"))
+	fmt.Println(dim("  it keeps running when you close or quit the terminal —  flowlite stop  ends it"))
 	fmt.Println(dim("  settings: flowlite settings    log: " + shortenHome(logPath)))
 	if notice := updateNotice(); notice != "" {
 		fmt.Println("  " + notice)
