@@ -14,6 +14,12 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   while you type. Without Accessibility the old list is shown instead.
 
 ### Fixed
+- **Quitting Terminal really no longer stops FlowLite.** v0.6.2 ran the
+  daemon as a launchd job, but macOS still credited that job to Terminal and
+  removed it when Terminal quit. The daemon is now opened as a hidden
+  FlowLite app (no Dock icon), which belongs to no other app. Your
+  Accessibility and microphone grants carry over, and a daemon still running
+  the v0.6.2 way switches over on its own.
 - **Quitting Terminal no longer stops FlowLite.** On macOS the background
   daemon is now started by launchd rather than by your terminal, so closing
   or quitting Terminal (or any other app) leaves it listening until

@@ -5,122 +5,152 @@ package cli
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sanke08/flowlite/internal/config"
 )
 
-// On macOS the background daemon is a launchd job, not a child of the shell.
+// On macOS the background daemon is opened as a hidden app, FlowLite.app, by
+// LaunchServices — the way `open -a Safari` starts Safari — not spawned by the
+// shell or bootstrapped into launchd from it.
 //
-// A daemon started from Terminal stays attributed to Terminal.app even after
-// setsid (Terminal is its responsible app for TCC). Quitting Terminal (Cmd-Q,
-// not just closing the window) was seen to stop it with a clean SIGTERM, most
-// likely macOS tearing down the app's processes. A launchd job is not tied to
-// any app, so nothing the user quits can take it down. The cost
-// is that macOS then asks about Accessibility and the microphone for flowlite
-// itself rather than for Terminal — a one-time grant.
+// Both of those leave the daemon credited to the terminal. setsid does not
+// change it, and neither does a launchd job: launchd attributes a job to the
+// coalition of whoever bootstrapped it (and onwards through any job that job
+// bootstraps). Terminal quits through AppKit's sudden termination, and macOS
+// then force-quits the app *and every service attributed to it*: the logs show
+// "removing job: caller = loginwindow" for the daemon right after Terminal
+// exits. An app opened by LaunchServices is its own app, attributed to no one,
+// so nothing the user quits can take it down. That was checked with a test app
+// that quits the same way Terminal does: a launchd job it bootstrapped was
+// removed; an app it opened kept running.
 //
-// The job is bootstrapped into the user's GUI session from a plist kept in the
-// config directory, not in ~/Library/LaunchAgents, so it does not start at
-// login: it lives until `flowlite stop`, logout or a reboot, as before.
+// FlowLite.app lives in the config directory and is rebuilt on every start:
+// an Info.plist (hidden, no Dock icon) and Contents/MacOS/flowlite, a symlink
+// to this binary, so an update in place is picked up without touching it.
+// macOS judges its permissions as the same flowlite as before — the
+// Accessibility and microphone grants carry over.
 
-const launchdLabel = "com.sanke08.flowlite.daemon"
+const (
+	appBundleName  = "FlowLite.app"
+	appBundleID    = "com.sanke08.flowlite"
+	legacyJobLabel = "com.sanke08.flowlite.daemon" // v0.6.2's launchd job
+)
 
-func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
-func launchdTarget() string { return launchdDomain() + "/" + launchdLabel }
-
-// spawnDaemon starts `flowlite --daemon` in the background and returns
-// without waiting for it. Shared by `flowlite start` and by a background
-// daemon reloading itself.
+// spawnDaemon opens the daemon and returns without waiting for it. Shared by
+// `flowlite start` (through spawnDaemonWatched) and by a daemon reloading
+// itself.
 func spawnDaemon() error {
-	if os.Getenv(launchdEnv) == "1" {
-		// Reload from inside the job: launchd stops this process (SIGTERM,
-		// which runDaemon treats as a normal stop) and starts a fresh one
-		// from the same definition. Start, not Run: launchctl may outlive
-		// us, and AbandonProcessGroup keeps launchd from killing it.
-		return exec.Command("launchctl", "kickstart", "-k", launchdTarget()).Start()
-	}
-	plist, err := writeLaunchdPlist()
+	c, err := openDaemonCmd(false)
 	if err != nil {
 		return err
 	}
-	// A job from an earlier start stays loaded (idle) after it exits; it has
-	// to go before the label can be bootstrapped again. "Not loaded" is fine.
-	_ = exec.Command("launchctl", "bootout", launchdTarget()).Run()
+	if out, err := c.CombinedOutput(); err != nil {
+		return fmt.Errorf("open %s: %v: %s", appBundleName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
-	// bootstrap straight after a bootout can fail with "5: Input/output
-	// error" while launchd finishes removing the old job, so retry briefly.
-	var out []byte
-	for attempt := 0; attempt < 10; attempt++ {
-		out, err = exec.Command("launchctl", "bootstrap", launchdDomain(), plist).CombinedOutput()
-		if err == nil {
-			return nil
+// spawnDaemonWatched opens the daemon and reports, through exited, whether it
+// has already quit — during startup that means it failed, and the log says
+// why. stop releases the watcher; the daemon keeps running either way.
+func spawnDaemonWatched() (exited func() bool, stop func(), err error) {
+	c, err := openDaemonCmd(true) // open -W: returns when the app exits
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := c.Start(); err != nil {
+		return nil, nil, err
+	}
+	done := make(chan struct{})
+	go func() { _ = c.Wait(); close(done) }()
+	exited = func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("launchctl bootstrap: %v: %s", err, strings.TrimSpace(string(out)))
+	// Killing the `open -W` waiter does not touch the app it opened.
+	stop = func() { _ = c.Process.Kill() }
+	return exited, stop, nil
 }
 
-// spawnedJobExited reports whether the launchd job has already run and exited,
-// which during startup means the daemon failed (the reason is in the log).
-func spawnedJobExited() bool {
-	out, err := exec.Command("launchctl", "print", launchdTarget()).Output()
+func openDaemonCmd(wait bool) (*exec.Cmd, error) {
+	app, err := ensureAppBundle()
 	if err != nil {
-		return false
+		return nil, err
 	}
-	// The job's own state is the first tab-indented "state =" line; nested
-	// sections have their own. A job that has not run yet is "spawn
-	// scheduled"/"xpcproxy" and still says "(never exited)".
-	s := string(out)
-	return strings.Contains(s, "\n\tstate = not running") &&
-		!strings.Contains(s, "(never exited)")
-}
-
-// removeDaemonJob unloads the launchd job and deletes its plist.
-func removeDaemonJob() {
-	_ = exec.Command("launchctl", "bootout", launchdTarget()).Run()
-	if p, err := launchdPlistPath(); err == nil {
-		_ = os.Remove(p)
-	}
-}
-
-func launchdPlistPath() (string, error) {
-	d, err := config.Dir()
+	lp, err := config.LogPath()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return filepath.Join(d, "daemon.plist"), nil
+	// -n: a fresh instance even while the old one is still shutting down
+	// (reload); -g: don't bring it forward; -j: launch it hidden.
+	args := []string{"-n", "-g", "-j"}
+	if wait {
+		args = append(args, "-W")
+	}
+	args = append(args,
+		"--env", backgroundEnv+"=1",
+		"--stdout", lp, "--stderr", lp,
+		app, "--args", "--daemon")
+	c := exec.Command("open", args...)
+	// open hands its environment to the app. Drop the v0.6.2 launchd marker
+	// so a migrating daemon's successor does not try to migrate again.
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, legacyLaunchdEnv+"=") {
+			c.Env = append(c.Env, kv)
+		}
+	}
+	return c, nil
 }
 
-func writeLaunchdPlist() (string, error) {
+// ensureAppBundle (re)writes FlowLite.app and returns its path.
+func ensureAppBundle() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	lp, err := config.LogPath()
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	d, err := config.Dir()
 	if err != nil {
 		return "", err
 	}
-	p, err := launchdPlistPath()
-	if err != nil {
+	app := filepath.Join(d, appBundleName)
+	macos := filepath.Join(app, "Contents", "MacOS")
+	if err := os.MkdirAll(macos, 0o755); err != nil {
 		return "", err
 	}
 
-	// launchd starts jobs with a minimal environment. Carry over what the
-	// detached daemon used to inherit from the shell and could depend on.
-	env := map[string]string{launchdEnv: "1"}
-	for _, k := range []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"} {
-		if v, ok := os.LookupEnv(k); ok {
-			env[k] = v
+	plist := appInfoPlist()
+	pp := filepath.Join(app, "Contents", "Info.plist")
+	if cur, err := os.ReadFile(pp); err != nil || !bytes.Equal(cur, plist) {
+		if err := os.WriteFile(pp, plist, 0o644); err != nil {
+			return "", err
 		}
 	}
 
+	link := filepath.Join(macos, "flowlite")
+	if cur, err := os.Readlink(link); err != nil || cur != exe {
+		_ = os.Remove(link)
+		if err := os.Symlink(exe, link); err != nil {
+			return "", err
+		}
+	}
+	return app, nil
+}
+
+func appInfoPlist() []byte {
 	var b bytes.Buffer
 	esc := func(s string) string {
 		var e bytes.Buffer
@@ -132,28 +162,47 @@ func writeLaunchdPlist() (string, error) {
 <plist version="1.0">
 <dict>
 `)
-	fmt.Fprintf(&b, "\t<key>Label</key><string>%s</string>\n", launchdLabel)
-	fmt.Fprintf(&b, "\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>%s</string>\n\t\t<string>--daemon</string>\n\t</array>\n", esc(exe))
-	b.WriteString("\t<key>RunAtLoad</key><true/>\n")
-	// No restarts: `flowlite stop` must stay stopped.
-	b.WriteString("\t<key>KeepAlive</key><false/>\n")
-	// A reload's `launchctl kickstart` is a child of the daemon it restarts.
-	b.WriteString("\t<key>AbandonProcessGroup</key><true/>\n")
-	// launchd otherwise holds a restart for 10 s after the last spawn, which
-	// two quick settings changes in a row would sit through.
-	b.WriteString("\t<key>ThrottleInterval</key><integer>1</integer>\n")
-	// Dictation is latency-sensitive; don't let it be throttled as background work.
-	b.WriteString("\t<key>ProcessType</key><string>Interactive</string>\n")
-	fmt.Fprintf(&b, "\t<key>StandardOutPath</key><string>%s</string>\n", esc(lp))
-	fmt.Fprintf(&b, "\t<key>StandardErrorPath</key><string>%s</string>\n", esc(lp))
-	b.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
-	for k, v := range env {
-		fmt.Fprintf(&b, "\t\t<key>%s</key><string>%s</string>\n", esc(k), esc(v))
-	}
-	b.WriteString("\t</dict>\n</dict>\n</plist>\n")
+	kv := func(k, v string) { fmt.Fprintf(&b, "\t<key>%s</key><string>%s</string>\n", k, esc(v)) }
+	kv("CFBundleIdentifier", appBundleID)
+	kv("CFBundleName", "FlowLite")
+	kv("CFBundleExecutable", "flowlite")
+	kv("CFBundlePackageType", "APPL")
+	kv("CFBundleInfoDictionaryVersion", "6.0")
+	kv("CFBundleShortVersionString", strings.TrimPrefix(Version, "v"))
+	kv("NSMicrophoneUsageDescription", "FlowLite listens while you hold the dictation key and turns your speech into text.")
+	// A background agent: no Dock icon, no menu bar, never the active app.
+	b.WriteString("\t<key>LSUIElement</key><true/>\n")
+	b.WriteString("</dict>\n</plist>\n")
+	return b.Bytes()
+}
 
-	if err := os.WriteFile(p, b.Bytes(), 0o644); err != nil {
-		return "", err
+// removeDaemonJob deletes FlowLite.app and anything v0.6.2 left in launchd.
+func removeDaemonJob() {
+	removeLegacyJob()
+	if d, err := config.Dir(); err == nil {
+		_ = os.RemoveAll(filepath.Join(d, appBundleName))
+		_ = os.Remove(filepath.Join(d, "daemon.plist"))
 	}
-	return p, nil
+}
+
+// v0.6.2 ran the daemon as a launchd job, which Terminal's quit still took
+// down. Unloading it is harmless when it is not there.
+func removeLegacyJob() {
+	_ = exec.Command("launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+legacyJobLabel).Run()
+}
+
+// migrateLegacyDaemon is run by a daemon that finds itself started the v0.6.2
+// way — as a launchd job, e.g. restarted by an old daemon's reload after an
+// update. It opens FlowLite.app in its place and then unloads its own job,
+// which ends this process. Returns an error only if the hand-over failed, in
+// which case this daemon simply carries on as it is.
+func migrateLegacyDaemon() error {
+	if os.Getenv(legacyLaunchdEnv) != "1" {
+		return errors.ErrUnsupported
+	}
+	if err := spawnDaemon(); err != nil {
+		return err
+	}
+	removeLegacyJob() // SIGTERMs this process
+	return nil
 }

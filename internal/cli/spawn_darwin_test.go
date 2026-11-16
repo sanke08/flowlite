@@ -3,33 +3,42 @@
 package cli
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// The plist launchd is handed must parse, with paths that contain spaces
-// ("Application Support") and characters that need XML escaping.
-func TestLaunchdPlistIsValid(t *testing.T) {
+// FlowLite.app must be a valid, hidden bundle whose executable is this binary.
+func TestAppBundle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()+"/a & <b>")
-	t.Setenv("LANG", "en_US.UTF-8")
-	p, err := writeLaunchdPlist()
+	app, err := ensureAppBundle()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("plutil", "-lint", p).CombinedOutput(); err != nil {
+	pl := filepath.Join(app, "Contents", "Info.plist")
+	if out, err := exec.Command("plutil", "-lint", pl).CombinedOutput(); err != nil {
 		t.Fatalf("plutil: %v: %s", err, out)
 	}
-	out, err := exec.Command("plutil", "-extract", "ProgramArguments.1", "raw", p).Output()
-	if err != nil || strings.TrimSpace(string(out)) != "--daemon" {
-		t.Fatalf("ProgramArguments: %q %v", out, err)
+	for key, want := range map[string]string{
+		"CFBundleIdentifier": appBundleID,
+		"CFBundleExecutable": "flowlite",
+		"LSUIElement":        "true",
+	} {
+		out, err := exec.Command("plutil", "-extract", key, "raw", pl).Output()
+		if err != nil || strings.TrimSpace(string(out)) != want {
+			t.Errorf("%s = %q (%v), want %q", key, out, err, want)
+		}
 	}
-	out, err = exec.Command("plutil", "-extract", "EnvironmentVariables."+launchdEnv, "raw", p).Output()
-	if err != nil || strings.TrimSpace(string(out)) != "1" {
-		t.Fatalf("%s: %q %v", launchdEnv, out, err)
+	exe, _ := os.Executable()
+	exe, _ = filepath.EvalSymlinks(exe)
+	got, err := os.Readlink(filepath.Join(app, "Contents", "MacOS", "flowlite"))
+	if err != nil || got != exe {
+		t.Fatalf("executable link = %q (%v), want %q", got, err, exe)
 	}
-	out, _ = exec.Command("plutil", "-extract", "StandardOutPath", "raw", p).Output()
-	if !strings.Contains(string(out), "a & <b>") {
-		t.Fatalf("StandardOutPath lost the escaped path: %q", out)
+	// A second call leaves a correct bundle alone and still succeeds.
+	if _, err := ensureAppBundle(); err != nil {
+		t.Fatal(err)
 	}
 }

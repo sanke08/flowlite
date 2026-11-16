@@ -129,7 +129,7 @@ Then run `flowlite start`. There is no need to reopen your terminal.
 Three details worth knowing:
 
 - The permission is granted to **flowlite itself**, not to Terminal. FlowLite
-  runs in the background on its own (macOS's launchd starts it), not inside
+  runs in the background on its own (as a hidden FlowLite app), not inside
   your terminal — which is why quitting Terminal does not stop it, and why it
   works the same from Terminal, iTerm, Warp or anything else.
 - The microphone works the same way: allow **flowlite** under

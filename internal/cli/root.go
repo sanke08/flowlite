@@ -155,15 +155,23 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// A daemon started the v0.6.2 way (a launchd job, which quitting
+	// Terminal still stopped) hands over to FlowLite.app and goes away.
+	if rootDaemon {
+		if err := migrateLegacyDaemon(); err == nil {
+			return nil
+		}
+	}
+
 	// 3. Keyboard permission missing: say exactly what to do and stop. A
 	// daemon that cannot see the keyboard is only a support ticket.
 	// The background daemon's own grant is checked by startBackground; here
 	// only the processes that run in this very process are: the daemon itself,
 	// and --no-paste, which runs in (and is judged as) the terminal.
 	if (rootDaemon || rootNoPaste) && permissions.Needed() && !permissions.Trusted() {
-		if rootDaemon && os.Getenv(launchdEnv) == "1" {
-			// launchd started this daemon, so macOS asks about flowlite
-			// itself, not the terminal. Requesting adds it to the
+		if rootDaemon && os.Getenv(backgroundEnv) == "1" {
+			// macOS opened this daemon as FlowLite.app, so it asks about
+			// flowlite itself, not the terminal. Requesting adds it to the
 			// Accessibility list so the user only has to flip the switch.
 			// This lands in the log, which `flowlite start` prints.
 			permissions.Request()

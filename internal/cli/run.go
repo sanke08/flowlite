@@ -218,9 +218,11 @@ func startBackground() error {
 	}
 	lp, _ := config.LogPath()
 	logStart := fileSize(lp)
-	if err := spawnDaemon(); err != nil {
+	exited, stopWatch, err := spawnDaemonWatched()
+	if err != nil {
 		return err
 	}
+	defer stopWatch()
 	// Give the model a moment to load so a failure shows up here. 45s: the
 	// same budget stopBackground and waitForReload give — this is the same
 	// daemon.New a cold start runs, which on a first run can block on the
@@ -228,16 +230,16 @@ func startBackground() error {
 	// (the README documents 15+ seconds for that alone).
 	spin := startSpinner("starting…")
 	defer spin.Stop()
-	for i := range 450 {
+	for range 450 {
 		time.Sleep(100 * time.Millisecond)
 		if pid, running := daemonRunning(); running {
 			spin.Stop()
 			printStartedBanner(cfg, pid, lp)
 			return nil
 		}
-		// Every half second: has the daemon already given up? Then say why
-		// now instead of after the whole 45 seconds.
-		if i%5 == 4 && spawnedJobExited() {
+		// Has the daemon already given up? Then say why now instead of
+		// after the whole 45 seconds.
+		if exited() {
 			break
 		}
 	}
@@ -269,11 +271,15 @@ func logSince(p string, offset int64) string {
 	return strings.Join(lines, "\n")
 }
 
-// launchdEnv marks a daemon that launchd started (macOS): a reload from
-// inside the job restarts the job instead of booting it out from under
-// itself, and a missing Accessibility grant is flowlite's own, not the
-// terminal's.
-const launchdEnv = "FLOWLITE_LAUNCHD"
+// backgroundEnv marks the background daemon as macOS opens it (FlowLite.app):
+// its Accessibility and microphone grants are flowlite's own, not the
+// terminal's, and a permission check from inside it needs no extra process.
+const backgroundEnv = "FLOWLITE_BACKGROUND"
+
+// legacyLaunchdEnv marks a daemon started the v0.6.2 way, as a launchd job,
+// which quitting Terminal still stopped. Such a daemon hands over to
+// FlowLite.app as soon as it starts (see migrateLegacyDaemon).
+const legacyLaunchdEnv = "FLOWLITE_LAUNCHD"
 
 // errForcedStop is returned by stopBackground when the daemon ignored the
 // graceful stop for 45 s and had to be killed. The daemon is gone and the

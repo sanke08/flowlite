@@ -3,8 +3,6 @@
 package cli
 
 import (
-	"bytes"
-	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,24 +14,20 @@ import (
 	"github.com/sanke08/flowlite/internal/permissions"
 )
 
-const permCheckLabel = "com.sanke08.flowlite.permcheck"
-
-// ownPermissions reports what macOS has granted flowlite itself — the
-// background daemon's permissions — rather than the terminal this command
+// ownPermissions reports what macOS has granted the background daemon —
+// FlowLite.app, i.e. flowlite itself — rather than the terminal this command
 // runs in.
 //
 // A process asks macOS about its *responsible* app, and anything run from a
-// shell is Terminal's. The daemon runs under launchd, where flowlite is
-// responsible for itself, so the only faithful check is to run one there: a
-// one-shot launchd job (`flowlite --perm-check FILE`) that writes the answer
-// and exits. With request it also shows the macOS prompts, so the Accessibility
-// list gains a "flowlite" entry and the microphone question is asked as
-// flowlite.
+// shell is Terminal's. So the check runs where the daemon runs: FlowLite.app
+// is opened once with `--perm-check FILE`, writes the answer and exits. With
+// request it also shows the macOS prompts, so the Accessibility list gains the
+// entry and the microphone question is asked as FlowLite.
 func ownPermissions(request bool) (ax bool, mic permissions.MicStatus, err error) {
-	if os.Getenv(launchdEnv) == "1" {
+	if os.Getenv(backgroundEnv) == "1" {
 		return permissions.Trusted(), permissions.Mic(), nil // already the daemon's context
 	}
-	exe, err := os.Executable()
+	app, err := ensureAppBundle()
 	if err != nil {
 		return false, 0, err
 	}
@@ -42,34 +36,15 @@ func ownPermissions(request bool) (ax bool, mic permissions.MicStatus, err error
 		return false, 0, err
 	}
 	out := filepath.Join(d, "permcheck.out")
-	plist := filepath.Join(d, "permcheck.plist")
 	_ = os.Remove(out)
+	defer os.Remove(out)
 
-	args := []string{exe, "--perm-check", out}
+	args := []string{"-n", "-g", "-j", app, "--args", "--perm-check", out}
 	if request {
 		args = append(args, "--perm-check-request")
 	}
-	if err := os.WriteFile(plist, permCheckPlist(args), 0o644); err != nil {
-		return false, 0, err
-	}
-	target := launchdDomain() + "/" + permCheckLabel
-	_ = exec.Command("launchctl", "bootout", target).Run()
-	defer func() {
-		_ = exec.Command("launchctl", "bootout", target).Run()
-		_ = os.Remove(plist)
-		_ = os.Remove(out)
-	}()
-
-	var lerr error
-	var lout []byte
-	for attempt := 0; attempt < 10; attempt++ {
-		if lout, lerr = exec.Command("launchctl", "bootstrap", launchdDomain(), plist).CombinedOutput(); lerr == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if lerr != nil {
-		return false, 0, fmt.Errorf("launchctl bootstrap: %v: %s", lerr, strings.TrimSpace(string(lout)))
+	if o, err := exec.Command("open", args...).CombinedOutput(); err != nil {
+		return false, 0, fmt.Errorf("open %s: %v: %s", appBundleName, err, strings.TrimSpace(string(o)))
 	}
 
 	// The microphone prompt waits for an answer (up to 120 s), so a request
@@ -84,33 +59,9 @@ func ownPermissions(request bool) (ax bool, mic permissions.MicStatus, err error
 		if err != nil {
 			continue
 		}
-		ax, mic, ok := parsePermCheck(string(b))
-		if ok {
+		if ax, mic, ok := parsePermCheck(string(b)); ok {
 			return ax, mic, nil
 		}
 	}
-	return false, 0, fmt.Errorf("the permission check did not answer (is %s still in place?)", exe)
-}
-
-func permCheckPlist(args []string) []byte {
-	esc := func(s string) string {
-		var e bytes.Buffer
-		_ = xml.EscapeText(&e, []byte(s))
-		return e.String()
-	}
-	var b bytes.Buffer
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-`)
-	fmt.Fprintf(&b, "\t<key>Label</key><string>%s</string>\n", permCheckLabel)
-	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
-	for _, a := range args {
-		fmt.Fprintf(&b, "\t\t<string>%s</string>\n", esc(a))
-	}
-	b.WriteString("\t</array>\n")
-	b.WriteString("\t<key>RunAtLoad</key><true/>\n\t<key>KeepAlive</key><false/>\n")
-	b.WriteString("</dict>\n</plist>\n")
-	return b.Bytes()
+	return false, 0, fmt.Errorf("the permission check did not answer")
 }
