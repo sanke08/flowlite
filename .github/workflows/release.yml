@@ -50,7 +50,7 @@ jobs:
   release:
     name: Build and publish
     if: github.event_name != 'pull_request'
-    runs-on: macos-14   # Apple Silicon runner; Metal is compiled in, not needed at build time
+    runs-on: macos-15   # Apple Silicon runner; Metal is compiled in, not needed at build time
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,7 +152,7 @@ jobs:
   test:
     name: Vet and test
     if: github.event_name == 'pull_request'
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
