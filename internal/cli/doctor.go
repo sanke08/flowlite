@@ -12,6 +12,7 @@ import (
 	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
+	"github.com/sanke08/flowlite/internal/engine"
 	"github.com/sanke08/flowlite/internal/inject"
 	"github.com/sanke08/flowlite/internal/permissions"
 	"github.com/sanke08/flowlite/internal/whisper"
@@ -87,6 +88,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		pass("engine", "whisper.cpp — "+note)
 	}
 
+	if v := engine.MoonshineVersion(); v != "" {
+		pass("moonshine", "transcribe.cpp "+v+" (Moonshine models available)")
+	} else {
+		info("moonshine", "not in this build — Whisper models only")
+	}
+
 	// -- model ------------------------------------------------------------
 	m, have := catalog.Get(cfg.Model)
 	switch {
@@ -100,16 +107,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		if doctorDeep {
 			check("model load", "loading "+m.Label+"…")
 			t0 := time.Now()
-			model, err := whisper.Load(p)
+			model, err := engine.Load(m)
 			if err != nil {
 				fail("model load", err.Error())
 			} else {
-				_, _ = model.Transcribe(make([]float32, audio.SampleRate), whisper.Options{})
-				dev := "CPU"
-				if whisper.UsingMetal() {
-					dev = "Metal GPU (" + whisper.GPUName() + ")"
-				}
-				pass("model load", fmt.Sprintf("%s in %s", dev, time.Since(t0).Round(time.Millisecond)))
+				_, _ = model.Transcribe(make([]float32, audio.SampleRate), engine.Options{})
+				pass("model load", fmt.Sprintf("%s on %s in %s", m.Engine.Name(), model.Device(), time.Since(t0).Round(time.Millisecond)))
 				model.Close()
 			}
 		}

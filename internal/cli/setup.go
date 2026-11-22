@@ -45,8 +45,8 @@ func runSetup(cfg *config.Config) error {
 
 	// 2. Model.
 	opts := make([]huh.Option[string], 0, len(catalog.Catalog))
-	for _, m := range catalog.Catalog {
-		label := fmt.Sprintf("%-30s %8s", m.Label, catalog.Human(m.SizeBytes))
+	for _, m := range catalog.Available() {
+		label := fmt.Sprintf("%-37s %8s  %-4s", m.Label, catalog.Human(m.SizeBytes), liveTag(m))
 		switch {
 		case m.Downloaded():
 			label += "   downloaded"

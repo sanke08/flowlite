@@ -105,3 +105,27 @@ func SetHistoryQuery(query string) { setHistoryQuery(query) }
 // HistoryHasKey reports whether the history panel currently holds keyboard
 // focus (so typing reaches its search field directly). Diagnostic only.
 func HistoryHasKey() bool { return historyHasKey() }
+
+// liveMaxRunes is how much of a live transcript the caption is handed. The
+// caption only shows its last few lines anyway; trimming here keeps a long
+// hands-free dictation from re-laying-out pages of text on every update.
+const liveMaxRunes = 400
+
+// liveTail trims a live transcript to roughly its last liveMaxRunes runes,
+// cutting at a word boundary in the committed part and marking the cut
+// with an ellipsis. The tentative tail is always kept whole.
+func liveTail(committed, tentative string) (string, string) {
+	room := liveMaxRunes - len([]rune(tentative))
+	c := []rune(committed)
+	if room < 0 {
+		room = 0
+	}
+	if len(c) <= room {
+		return committed, tentative
+	}
+	cut := string(c[len(c)-room:])
+	if i := strings.IndexByte(cut, ' '); i >= 0 && i < len(cut)-1 {
+		cut = cut[i+1:]
+	}
+	return "… " + cut, tentative
+}

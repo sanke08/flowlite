@@ -40,6 +40,7 @@ type menuItem string
 
 const (
 	itemModel         menuItem = "model"
+	itemLive          menuItem = "live"
 	itemKey           menuItem = "key"
 	itemThreshold     menuItem = "threshold"
 	itemHandsFreeStop menuItem = "handsfree-stop"
@@ -157,6 +158,7 @@ func menuOptions(cfg *config.Config) []huh.Option[menuItem] {
 	}
 	return []huh.Option[menuItem]{
 		huh.NewOption(row("Speech model", model), itemModel),
+		huh.NewOption(row("Live transcription", liveValue(cfg)), itemLive),
 		huh.NewOption(row("Dictation key", hotkey.Label(cfg.Hotkey)), itemKey),
 		huh.NewOption(row("Hold threshold", fmt.Sprintf("%d ms", cfg.HoldThresholdMS)), itemThreshold),
 		huh.NewOption(row("Hands-free auto-stop", handsFreeStopValue(cfg)), itemHandsFreeStop),
@@ -208,6 +210,8 @@ func runMenuItem(cfg *config.Config, item menuItem) (menuResult, error) {
 	switch item {
 	case itemModel:
 		return asResult(changeModel(cfg))
+	case itemLive:
+		return asResult(changeLive(cfg))
 	case itemKey:
 		return asResult(changeKey(cfg))
 	case itemThreshold:
@@ -257,8 +261,8 @@ func save(cfg *config.Config, what, value string) (bool, error) {
 
 func changeModel(cfg *config.Config) (bool, error) {
 	opts := make([]huh.Option[string], 0, len(catalog.Catalog))
-	for _, m := range catalog.Catalog {
-		label := fmt.Sprintf("%-30s %8s", m.Label, catalog.Human(m.SizeBytes))
+	for _, m := range catalog.Available() {
+		label := fmt.Sprintf("%-37s %8s  %-4s", m.Label, catalog.Human(m.SizeBytes), liveTag(m))
 		switch {
 		case m.Downloaded() && m.Key == cfg.Model:
 			label += "   " + ok("● installed")
@@ -286,6 +290,64 @@ func changeModel(cfg *config.Config) (bool, error) {
 	}
 	// switchModel downloads, saves, prunes and prints its own confirmation.
 	return true, switchModel(cfg, m)
+}
+
+// liveValue is the Live transcription row's current value.
+func liveValue(cfg *config.Config) string {
+	switch {
+	case !cfg.LiveTranscription:
+		return "off"
+	case cfg.LiveTyping():
+		return "types as you speak"
+	default:
+		return "caption"
+	}
+}
+
+func changeLive(cfg *config.Config) (bool, error) {
+	desc := "Type: your words go into the field you are typing in as you speak, and are corrected when you let go.\n" +
+		"Caption: they appear next to the pill instead, and the text is pasted when you let go.\n" +
+		"Either way the final text comes from one full pass over the whole recording, as with this off."
+	if m, has := catalog.Get(cfg.Model); has {
+		if m.Streaming {
+			desc += "\n" + m.Label + " streams, so the words follow your voice closely."
+		} else {
+			desc += "\n" + m.Label + " re-reads the last few seconds about every half second, so the words trail a little. A Moonshine Streaming model follows more closely."
+		}
+	}
+	const (
+		off     = "off"
+		typing  = "type"
+		caption = "caption"
+	)
+	choice := off
+	if cfg.LiveTranscription {
+		choice = typing
+		if !cfg.LiveTyping() {
+			choice = caption
+		}
+	}
+	was := choice
+	if err := runPrompt(huh.NewSelect[string]().
+		Title("Live transcription").
+		Description(desc).
+		Options(
+			huh.NewOption("Type as you speak", typing),
+			huh.NewOption("Show in a caption", caption),
+			huh.NewOption("Off", off),
+		).
+		Value(&choice)); err != nil {
+		return false, err
+	}
+	if choice == was {
+		return false, nil
+	}
+	cfg.LiveTranscription = choice != off
+	cfg.LiveStyle = config.LiveType
+	if choice == caption {
+		cfg.LiveStyle = config.LiveCaption
+	}
+	return save(cfg, "live transcription", liveValue(cfg))
 }
 
 func changeKey(cfg *config.Config) (bool, error) {

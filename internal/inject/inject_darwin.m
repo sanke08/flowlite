@@ -72,3 +72,70 @@ bool flowlite_paste_keystroke(void) {
     if (src)     CFRelease(src);
     return ok;
 }
+
+// ---- typing -------------------------------------------------------------
+//
+// Live transcription types its words instead of pasting them, so they land as
+// they are spoken and the clipboard is never touched. Each event carries up
+// to kChunk UTF-16 units of text (CGEventKeyboardSetUnicodeString's own
+// limit is 20) on a key code no hotkey uses; the receiving app inserts the
+// string whatever the key code. The events come from a private source with
+// their modifier flags cleared, because the user is usually still holding
+// the dictation key — often Option — and Option-held text means something
+// else to many apps.
+
+static bool postKey(CGEventSourceRef src, CGKeyCode key, const UniChar *chars, UniCharCount n) {
+    CGEventRef down = CGEventCreateKeyboardEvent(src, key, true);
+    CGEventRef up   = CGEventCreateKeyboardEvent(src, key, false);
+    bool ok = down && up;
+    if (ok) {
+        CGEventSetFlags(down, 0);
+        CGEventSetFlags(up, 0);
+        if (chars) {
+            CGEventKeyboardSetUnicodeString(down, n, chars);
+            CGEventKeyboardSetUnicodeString(up, n, chars);
+        }
+        CGEventPost(kCGSessionEventTap, down);
+        CGEventPost(kCGSessionEventTap, up);
+    }
+    if (down) CFRelease(down);
+    if (up)   CFRelease(up);
+    return ok;
+}
+
+bool flowlite_type_text(const char *utf8) {
+    if (!AXIsProcessTrusted()) return false;
+    @autoreleasepool {
+        NSString *s = [NSString stringWithUTF8String:utf8];
+        if (!s) return false;
+        enum { kChunk = 16 };
+        CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStatePrivate);
+        NSUInteger len = [s length];
+        bool ok = true;
+        for (NSUInteger at = 0; at < len && ok; ) {
+            NSUInteger n = MIN((NSUInteger)kChunk, len - at);
+            // Never split a surrogate pair across two events.
+            if (at + n < len && CFStringIsSurrogateHighCharacter([s characterAtIndex:at + n - 1])) n--;
+            UniChar buf[kChunk];
+            [s getCharacters:buf range:NSMakeRange(at, n)];
+            ok = postKey(src, 0, buf, (UniCharCount)n);
+            at += n;
+            usleep(2000); // a breath between events, so slow apps keep up
+        }
+        if (src) CFRelease(src);
+        return ok;
+    }
+}
+
+bool flowlite_backspace(int n) {
+    if (!AXIsProcessTrusted()) return false;
+    const CGKeyCode kDelete = 51;
+    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    bool ok = true;
+    for (int i = 0; i < n && ok; i++) {
+        ok = postKey(src, kDelete, NULL, 0);
+        usleep(1500);
+    }
+    if (src) CFRelease(src);
+    return ok;
+}

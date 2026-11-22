@@ -11,6 +11,8 @@ char *flowlite_clipboard_get(void);
 bool  flowlite_clipboard_set(const char *text);
 long  flowlite_clipboard_serial(void);
 bool  flowlite_paste_keystroke(void);
+bool  flowlite_type_text(const char *utf8);
+bool  flowlite_backspace(int n);
 */
 import "C"
 
@@ -45,6 +47,24 @@ func clipboardSerial() uint64 { return uint64(C.flowlite_clipboard_serial()) }
 func pasteKeystroke() error {
 	if !bool(C.flowlite_paste_keystroke()) {
 		return errors.New("keyboard access is off — System Settings → Privacy & Security → Accessibility, switch on your terminal (or FlowLite), then restart it")
+	}
+	return nil
+}
+
+var errNoKeyboard = errors.New("keyboard access is off — System Settings → Privacy & Security → Accessibility")
+
+func typeText(text string) error {
+	c := C.CString(text)
+	defer C.free(unsafe.Pointer(c))
+	if !bool(C.flowlite_type_text(c)) {
+		return errNoKeyboard
+	}
+	return nil
+}
+
+func backspace(n int) error {
+	if !bool(C.flowlite_backspace(C.int(n))) {
+		return errNoKeyboard
 	}
 	return nil
 }

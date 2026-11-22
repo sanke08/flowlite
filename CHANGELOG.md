@@ -3,9 +3,24 @@
 All notable changes to FlowLite. Versions follow [Semantic Versioning](https://semver.org):
 MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
-## [Unreleased]
+## [0.7.0] — 2026-11-22
 
 ### Added
+- **Live transcription** (`flowlite settings` → Live transcription, off by
+  default). While you speak, your words appear in a caption next to the pill —
+  settled words in white, the last few the model is still unsure of in grey.
+  What gets pasted is unchanged: one full pass over the whole recording when
+  you let go, so the preview can never make the result worse. With a Whisper
+  model the caption re-reads the last few seconds about every half second;
+  with a Moonshine Streaming model it follows your voice as you talk. The
+  caption is macOS-only for now.
+- **Moonshine models** (English only, via transcribe.cpp, still fully on
+  this Mac): Moonshine Base for plain dictation, and Moonshine Streaming Tiny,
+  Small and Medium for live transcription (they do plain dictation too).
+  Streaming Small is the pick for live use: accuracy well above Whisper Base
+  at 199 MB. Long recordings are read in pieces cut at pauses, which keeps
+  the endings of long dictations intact. The first load on a Mac compiles GPU
+  shaders (~30 s, once) — FlowLite does that right after the download.
 - **Choose the dictation key by pressing it.** In `flowlite settings` (and
   setup), "Dictation key" now listens: press one key or up to three held
   together — Fn, Fn + Control, Right Command + Space, F5 — see it live, and
@@ -13,7 +28,23 @@ MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
   usable. A lone letter or other typing key is refused, since it would fire
   while you type. Without Accessibility the old list is shown instead.
 
+### Changed
+- **Still exactly one model on disk, now across both engines.** Choosing a
+  model while another FlowLite window is downloading one stops that download
+  and deletes its partial file; leftover partial downloads are cleaned up too.
+- `make build` / `make release` also build transcribe.cpp (once, ~1 min,
+  needs cmake). A plain `go build` still works and simply leaves Moonshine out.
+
 ### Fixed
+- **Accessibility no longer breaks on every update.** macOS pinned the grant
+  to the exact build, so after an update the switch in System Settings stayed
+  on but did nothing, and removing it by hand was the only cure. The hidden
+  FlowLite app now carries its own signed copy of flowlite and is signed so
+  macOS identifies it by name, not by build; updates keep the grant. If a
+  grant is ever stale, `flowlite start` and `flowlite doctor --request` clear
+  it and ask again, so you only switch it on. One-time change: macOS sees this
+  as a new app, so switch on **flowlite** under Accessibility and allow the
+  microphone once more (an older `flowlite` row there can be removed).
 - **Quitting Terminal really no longer stops FlowLite.** v0.6.2 ran the
   daemon as a launchd job, but macOS still credited that job to Terminal and
   removed it when Terminal quit. The daemon is now opened as a hidden

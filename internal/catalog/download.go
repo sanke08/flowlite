@@ -9,10 +9,105 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sanke08/flowlite/internal/config"
 )
+
+// One model downloads at a time, machine-wide, whatever its engine. A second
+// download does not wait its turn or give up: it takes over. It leaves a
+// takeover note naming the model it wants, the download in progress sees the
+// note within a moment, stops, deletes its partial file (unless the note asks
+// for that same model, which then simply resumes from it) and lets go of the
+// lock, and the newcomer proceeds.
+
+// ErrDownloadBusy means another FlowLite process holds the download lock.
+var ErrDownloadBusy = errors.New("another FlowLite window is downloading a model")
+
+// errTakenOver is what a download returns when another one replaced it.
+type errTakenOver struct{ by string }
+
+func (e errTakenOver) Error() string {
+	return fmt.Sprintf("download stopped: another FlowLite window switched to %s", e.by)
+}
+
+// takeoverWait is how long a new download waits for the old one to stop.
+const takeoverWait = 20 * time.Second
+
+func lockPaths() (lock, takeover string, err error) {
+	root, err := config.ModelsRoot()
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(root, ".download.lock"), filepath.Join(root, ".download.takeover"), nil
+}
+
+// lockDownloads takes the machine-wide download lock for model key, taking
+// it over from a download already in progress if there is one.
+func lockDownloads(ctx context.Context, key string) (release func(), err error) {
+	lock, takeover, err := lockPaths()
+	if err != nil {
+		return nil, err
+	}
+	release, err = tryLock(lock)
+	if errors.Is(err, ErrDownloadBusy) {
+		if werr := os.WriteFile(takeover, []byte(key), 0o644); werr != nil {
+			return nil, werr
+		}
+		deadline := time.Now().Add(takeoverWait)
+		for errors.Is(err, ErrDownloadBusy) && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				os.Remove(takeover)
+				return nil, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+			release, err = tryLock(lock)
+		}
+		if errors.Is(err, ErrDownloadBusy) {
+			os.Remove(takeover)
+			return nil, errors.New("another FlowLite window is downloading a model and did not stop — close it and try again")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Holding the lock, any note left is either ours or from a newcomer
+	// that gave up; neither is meant for this download.
+	os.Remove(takeover)
+	return release, nil
+}
+
+// takenOver reports which model a takeover note asks for, if one is there.
+func takenOver() (string, bool) {
+	_, takeover, err := lockPaths()
+	if err != nil {
+		return "", false
+	}
+	b, err := os.ReadFile(takeover)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(b)), true
+}
+
+// dropPartials deletes the half-finished downloads of every model but keep.
+// Completed models are left alone: the one in use stays until its
+// replacement is fully on disk (see PruneExcept).
+func dropPartials(keep string) {
+	for _, m := range Catalog {
+		if m.Key == keep {
+			continue
+		}
+		if p, err := m.Path(); err == nil {
+			os.Remove(p + ".part")
+			os.Remove(p + ".part.etag")
+		}
+	}
+}
 
 // Progress receives cumulative bytes and the total (0 if unknown).
 type Progress func(done, total int64)
@@ -23,6 +118,16 @@ type Progress func(done, total int64)
 // passed a checksum, so a killed or corrupted download can never masquerade
 // as a finished model.
 func Download(ctx context.Context, m Model, progress Progress) error {
+	// One download at a time, machine-wide, whatever the engine: FlowLite
+	// keeps a single model, and two settings windows fetching two models at
+	// once would end with both on disk.
+	release, err := lockDownloads(ctx, m.Key)
+	if err != nil {
+		return err
+	}
+	defer release()
+	dropPartials(m.Key)
+
 	final, err := m.Path()
 	if err != nil {
 		return err
@@ -112,6 +217,7 @@ func Download(ctx context.Context, m Model, progress Progress) error {
 	buf := make([]byte, 1<<20)
 	done := have
 	last := time.Now()
+	lastCheck := time.Now()
 	if progress != nil {
 		progress(done, total)
 	}
@@ -131,6 +237,21 @@ func Download(ctx context.Context, m Model, progress Progress) error {
 		}
 		if rerr == io.EOF {
 			break
+		}
+		if time.Since(lastCheck) > 250*time.Millisecond {
+			lastCheck = time.Now()
+			if by, ok := takenOver(); ok {
+				f.Close()
+				if by != m.Key {
+					os.Remove(part)
+					os.Remove(metaPath)
+				}
+				label := by
+				if other, ok := Get(by); ok {
+					label = other.Label
+				}
+				return errTakenOver{by: label}
+			}
 		}
 		if rerr != nil {
 			f.Close()

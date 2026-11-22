@@ -58,8 +58,12 @@ var (
 	rootHistOut     string // PNG path for --history-preview's snapshot ("" = none)
 	rootHistQuery   string // search text to type into the panel before the snapshot
 	rootPlayCues    bool   // play the six audio cues, then exit
+	rootLivePreview string // pretend dictation with the live caption at this edge
 	rootPermCheck   string // report this process's own permissions into this file
 	rootPermCheckRq bool   // with --perm-check, show the macOS prompts first
+	rootLiveOut     string // directory for --live-preview's caption snapshots ("" = none)
+	rootWAV         string // run a WAV file through a model, final pass and live preview
+	rootWAVModel    string // catalog key for --transcribe-wav ("" = the configured model)
 	rootNoPaste     bool   // user-facing: print transcripts instead of pasting
 )
 
@@ -118,8 +122,14 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if rootPlayCues {
 		return playCues()
 	}
+	if rootLivePreview != "" {
+		return livePreview(rootLivePreview, rootLiveOut)
+	}
 	if rootPermCheck != "" {
 		return runPermCheck(rootPermCheck, rootPermCheckRq)
+	}
+	if rootWAV != "" {
+		return transcribeWAV(rootWAV, rootWAVModel)
 	}
 
 	cfg, err := loadConfig()
@@ -261,7 +271,7 @@ func printAccessibilityFix(requested bool) {
 	if !requested {
 		fmt.Println("       1.", blue("flowlite doctor --request"), dim("— opens the macOS prompt and adds "+app+" to the list"))
 	} else {
-		fmt.Println("       1.", dim("a macOS prompt should have appeared; it added "+app+" to the list"))
+		fmt.Println("       1.", dim("a macOS prompt should have appeared; it added "+app+" to the list (any older entry was cleared)"))
 	}
 	fmt.Println("       2. System Settings → Privacy & Security → Accessibility → switch on", bold(app))
 	fmt.Println("       3. run:", blue("flowlite start"), dim("(flowlite doctor confirms it)"))
@@ -269,7 +279,8 @@ func printAccessibilityFix(requested bool) {
 	if runtime.GOOS == "darwin" {
 		fmt.Println(dim("     FlowLite runs in the background on its own, not inside your terminal, so"))
 		fmt.Println(dim("     the switch is for flowlite itself. macOS ties it to this exact build: after"))
-		fmt.Println(dim("     an update, if dictation stops, switch flowlite off and on again there."))
+		fmt.Println(dim("     an update, run flowlite doctor --request — it refreshes the entry; switch it on."))
+		fmt.Println(dim("     (An extra, older \"flowlite\" row is harmless; remove it with − if you like.)"))
 	}
 }
 
@@ -363,8 +374,13 @@ func init() {
 	_ = f.MarkHidden("history-preview-out")
 	_ = f.MarkHidden("history-preview-query")
 	_ = f.MarkHidden("play-cues")
+	f.StringVar(&rootLivePreview, "live-preview", "", "internal: pretend dictation showing the live caption at this edge")
+	f.StringVar(&rootLiveOut, "live-preview-out", "", "internal: with --live-preview, write caption PNG snapshots here")
+	f.StringVar(&rootWAV, "transcribe-wav", "", "internal: run a 16 kHz mono WAV through the model, final pass and live preview")
+	f.StringVar(&rootWAVModel, "transcribe-model", "", "internal: with --transcribe-wav, the catalog key to use")
 	f.StringVar(&rootPermCheck, "perm-check", "", "internal: write this process's Accessibility and microphone state to this file")
 	f.BoolVar(&rootPermCheckRq, "perm-check-request", false, "internal: with --perm-check, show the macOS prompts first")
-	_ = f.MarkHidden("perm-check")
-	_ = f.MarkHidden("perm-check-request")
+	for _, n := range []string{"live-preview", "live-preview-out", "transcribe-wav", "transcribe-model", "perm-check", "perm-check-request"} {
+		_ = f.MarkHidden(n)
+	}
 }

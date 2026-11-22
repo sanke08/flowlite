@@ -8,8 +8,8 @@ import (
 	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
+	"github.com/sanke08/flowlite/internal/engine"
 	"github.com/sanke08/flowlite/internal/speech"
-	"github.com/sanke08/flowlite/internal/whisper"
 )
 
 // testSeconds is how long settings → Test microphone records.
@@ -23,23 +23,18 @@ func testMicrophone(cfg *config.Config) error {
 	if !have || !m.Downloaded() {
 		return fmt.Errorf("no model installed — choose one under Speech model first")
 	}
-	path, _ := m.Path()
-
 	spin := startSpinner("loading " + m.Label + "…")
 	defer spin.Stop() // no-op after Done; matters only on the error returns
 	t0 := time.Now()
-	model, err := whisper.Load(path)
+	model, err := engine.Load(m)
 	if err != nil {
 		return err
 	}
 	defer model.Close()
-	if _, err := model.Transcribe(make([]float32, audio.SampleRate), whisper.Options{}); err != nil {
+	if _, err := model.Transcribe(make([]float32, audio.SampleRate), engine.Options{}); err != nil {
 		return err
 	}
-	dev := "CPU"
-	if whisper.UsingMetal() {
-		dev = "Metal GPU, " + whisper.GPUName()
-	}
+	dev := model.Device()
 	spin.Done(fmt.Sprintf("loading %s… %s (%s, %s)", m.Label, ok("ready"), dev, time.Since(t0).Round(time.Millisecond)))
 
 	rec := audio.NewRecorder(cfg.InputDevice, testSeconds+1)
@@ -63,13 +58,12 @@ func testMicrophone(cfg *config.Config) error {
 
 	spin = startSpinner("transcribing…")
 	t0 = time.Now()
-	segs, err := model.Transcribe(samples, whisper.Options{Language: cfg.Language})
+	text, err := model.Transcribe(samples, engine.Options{Language: cfg.Language})
 	took := time.Since(t0)
 	spin.Stop()
 	if err != nil {
 		return err
 	}
-	text := speech.Finalise(segs)
 	secs := float64(len(samples)) / audio.SampleRate
 	fmt.Printf("%s %.1fs of audio in %s (%.1fx realtime)\n", ok("transcribed"), secs, took.Round(time.Millisecond), secs/took.Seconds())
 	fmt.Println()

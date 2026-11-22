@@ -19,6 +19,9 @@ void flowlite_overlay_hide_history(void);
 bool flowlite_overlay_history_open(void);
 void flowlite_overlay_history_set_query(const char *query);
 bool flowlite_overlay_history_has_key(void);
+void flowlite_overlay_set_live_text(const char *committed, const char *tentative);
+void flowlite_overlay_hide_live_text(void);
+bool flowlite_overlay_snapshot_caption(const char *path);
 
 // Called back from overlay_darwin.m when the user acts on the history panel.
 extern void flowliteHistoryPick(int index);
@@ -68,6 +71,39 @@ func SetLevel(level float64) {
 // Hide fades the pill out.
 func Hide() {
 	mainloop.Dispatch(func() { C.flowlite_overlay_hide() })
+}
+
+// SetLiveText shows (or updates) the live-transcription caption next to the
+// pill: committed words bright, the tentative tail dim. Only the newest
+// part of a long transcript is kept; see liveTail.
+func SetLiveText(committed, tentative string) {
+	committed, tentative = liveTail(committed, tentative)
+	mainloop.Dispatch(func() {
+		c := C.CString(committed)
+		t := C.CString(tentative)
+		defer C.free(unsafe.Pointer(c))
+		defer C.free(unsafe.Pointer(t))
+		C.flowlite_overlay_set_live_text(c, t)
+	})
+}
+
+// HideLiveText fades the caption out.
+func HideLiveText() {
+	mainloop.Dispatch(func() { C.flowlite_overlay_hide_live_text() })
+}
+
+// SnapshotCaption renders the live caption, as it is now, to a PNG.
+func SnapshotCaption(path string) error {
+	var ok bool
+	mainloop.DispatchSync(func() {
+		c := C.CString(path)
+		defer C.free(unsafe.Pointer(c))
+		ok = bool(C.flowlite_overlay_snapshot_caption(c))
+	})
+	if !ok {
+		return errors.New("could not render the caption")
+	}
+	return nil
 }
 
 // Snapshot renders the pill's current appearance directly to a PNG file at

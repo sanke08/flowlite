@@ -10,11 +10,15 @@ package whisper
 /*
 #cgo windows LDFLAGS: -lwhisper -lggml -lggml-base
 #cgo linux LDFLAGS: -lwhisper -lggml -lggml-base
+#include <stdbool.h>
 #include <stdlib.h>
 #include "ggml-backend.h"
 #include "whisper.h"
 
 void flowlite_whisper_install_logger(void);
+void flowlite_whisper_set_abort(struct whisper_full_params *p, int *flag);
+void flowlite_flag_store(int *flag, int v);
+bool flowlite_flag_load(int *flag);
 */
 import "C"
 
@@ -128,6 +132,41 @@ type Options struct {
 	Language string
 	// Threads for the decoder; 0 picks a sensible default.
 	Threads int
+	// Abort, when set, cuts the run short once raised; Transcribe then
+	// returns ErrAborted. Live previews use it so releasing the key never
+	// waits behind a preview nobody will see.
+	Abort *Flag
+}
+
+// ErrAborted is returned by a Transcribe whose Options.Abort was raised.
+var ErrAborted = errors.New("transcription aborted")
+
+// Flag is a cancellation signal whisper.cpp can poll from its own threads.
+// It lives in C memory, so call Free once no Transcribe can still be using it.
+type Flag struct {
+	p *C.int
+}
+
+// NewFlag returns a lowered flag.
+func NewFlag() *Flag {
+	f := &Flag{p: (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))}
+	C.flowlite_flag_store(f.p, 0)
+	return f
+}
+
+// Raise asks any run using this flag to stop. Safe from any goroutine.
+func (f *Flag) Raise() { C.flowlite_flag_store(f.p, 1) }
+
+// Pointer is the flag's C int, for other C libraries' abort callbacks to
+// poll (with an atomic load).
+func (f *Flag) Pointer() unsafe.Pointer { return unsafe.Pointer(f.p) }
+
+// Free releases the flag's memory.
+func (f *Flag) Free() {
+	if f.p != nil {
+		C.free(unsafe.Pointer(f.p))
+		f.p = nil
+	}
 }
 
 // DefaultThreads: on Apple Silicon the encoder runs on the GPU, so these only
@@ -213,8 +252,14 @@ func (m *Model) Transcribe(samples []float32, opt Options) ([]string, error) {
 	p.print_realtime = C.bool(false)
 	p.print_timestamps = C.bool(false)
 	p.print_special = C.bool(false)
+	if opt.Abort != nil {
+		C.flowlite_whisper_set_abort(&p, opt.Abort.p)
+	}
 
 	rc := C.whisper_full(m.ctx, p, (*C.float)(unsafe.Pointer(&samples[0])), C.int(len(samples)))
+	if rc != 0 && opt.Abort != nil && bool(C.flowlite_flag_load(opt.Abort.p)) {
+		return nil, ErrAborted
+	}
 	if rc != 0 {
 		return nil, fmt.Errorf("whisper_full failed (%d)", int(rc))
 	}

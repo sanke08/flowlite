@@ -148,6 +148,33 @@ func (r *Recorder) Duration() float64 {
 	return float64(len(r.buf)) / SampleRate
 }
 
+// Since copies the audio captured from sample offset from onwards, and
+// returns it with the total captured so far — the offset to pass next time.
+// It leaves the recording running; live transcription reads with it.
+func (r *Recorder) Since(from int) ([]float32, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(r.buf)
+	if from < 0 {
+		from = 0
+	}
+	if from >= n {
+		return nil, n
+	}
+	out := make([]float32, n-from)
+	copy(out, r.buf[from:])
+	return out, n
+}
+
+// Tail copies at most the last max samples captured so far, leaving the
+// recording running, and returns them with the total captured.
+func (r *Recorder) Tail(max int) ([]float32, int) {
+	r.mu.Lock()
+	n := len(r.buf)
+	r.mu.Unlock()
+	return r.Since(n - max)
+}
+
 // Overflowed reports whether the max duration was hit.
 func (r *Recorder) Overflowed() bool {
 	r.mu.Lock()

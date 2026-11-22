@@ -16,6 +16,8 @@ extern void flowliteHistoryClosed(void);
 //   failed     — the stubs turn red, pulse twice, then the pill fades away
 // Success and cancel draw nothing new: the pill simply fades out, wordlessly
 // — there is nothing to explain when there was simply nothing to transcribe.
+// (Live transcription's words never go in the pill either: they get a
+// caption window of their own, at the end of this file.)
 //
 // The pill sits centred on one edge of the screen (bottom by default, or top,
 // left, right), EDGE_GAP points in from the *physical* edge on every side. At
@@ -1341,6 +1343,189 @@ bool flowlite_overlay_snapshot_window(const char *path) {
         NSBitmapImageRep *rep = [cv bitmapImageRepForCachingDisplayInRect:[cv bounds]];
         if (!rep) return false;
         [cv cacheDisplayInRect:[cv bounds] toBitmapImageRep:rep];
+        NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        return [png writeToFile:[NSString stringWithUTF8String:path] atomically:YES];
+    }
+}
+
+// ---- live caption -------------------------------------------------------
+//
+// With live transcription on, the words so far appear in a caption: a second
+// black capsule just inward of the pill (above it at the bottom edge, below
+// it at the top, beside it on the sides). It is a separate window rather
+// than a growing pill, so the pill's own shape, springs and wordless design
+// are untouched; it only ever shows while a recording is live, and like the
+// pill it never takes focus or a click.
+//
+// Committed words — ones the model will not change — draw bright; the
+// tentative tail it is still guessing at draws dim. A long transcript keeps
+// its newest CAP_MAX_LINES lines visible: the oldest scroll off the top.
+
+#define CAP_MAX_W      520.0   // widest the caption grows before wrapping
+#define CAP_PAD_X       14.0
+#define CAP_PAD_Y        9.0
+#define CAP_GAP          8.0   // between the pill and the caption
+#define CAP_FONT_SIZE   14.0
+#define CAP_MAX_LINES    3
+#define CAP_FADE_IN      0.12
+#define CAP_FADE_OUT     0.20
+
+@interface FLCaptionView : NSView {
+@public
+    NSAttributedString *text;
+    double textH;              // full laid-out height of text, maybe > visible
+}
+@end
+
+@implementation FLCaptionView
+- (BOOL)isOpaque { return NO; }
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NSRect b = self.bounds;
+    NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(b, 0.5, 0.5)
+                                                         xRadius:RADIUS yRadius:RADIUS];
+    [[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:0.94] setFill];
+    [body fill];
+    [[NSColor colorWithCalibratedWhite:1.0 alpha:0.045] setStroke];
+    [body setLineWidth:1.0];
+    [body stroke];
+    if (!text) return;
+    // Anchor the text's last line to the bottom padding; anything taller
+    // than the caption runs off the top and is clipped there.
+    NSRect inner = NSInsetRect(b, CAP_PAD_X, CAP_PAD_Y);
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(inner);
+    NSRect r = NSMakeRect(NSMinX(inner), NSMinY(inner), inner.size.width, textH);
+    [text drawWithRect:r options:NSStringDrawingUsesLineFragmentOrigin];
+    [NSGraphicsContext restoreGraphicsState];
+}
+@end
+
+static NSPanel       *capPanel = nil;
+static FLCaptionView *capView  = nil;
+static unsigned       capGen   = 0;    // bumps on every show, so a stale fade-out cannot order a fresh caption out
+static BOOL           capUp    = NO;
+
+static void ensureCaption(void) {
+    if (capPanel) return;
+    NSRect frame = NSMakeRect(0, 0, 100, 32);
+    capPanel = [[NSPanel alloc] initWithContentRect:frame
+                                          styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                            backing:NSBackingStoreBuffered
+                                              defer:NO];
+    applyTraits(capPanel);
+    capView = [[FLCaptionView alloc] initWithFrame:frame];
+    [capPanel setContentView:capView];
+}
+
+static NSFont *captionFont(void) { return [NSFont systemFontOfSize:CAP_FONT_SIZE]; }
+
+static NSAttributedString *captionString(NSString *committed, NSString *tentative) {
+    static NSMutableParagraphStyle *style = nil;
+    if (!style) {
+        style = [[NSMutableParagraphStyle alloc] init];
+        style.lineBreakMode = NSLineBreakByWordWrapping;
+    }
+    NSMutableAttributedString *s = [[NSMutableAttributedString alloc] init];
+    NSDictionary *bright = @{
+        NSFontAttributeName: captionFont(),
+        NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.96 alpha:1.0],
+        NSParagraphStyleAttributeName: style,
+    };
+    NSDictionary *dim = @{
+        NSFontAttributeName: captionFont(),
+        NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:1.0 alpha:0.50],
+        NSParagraphStyleAttributeName: style,
+    };
+    if (committed.length) [s appendAttributedString:[[NSAttributedString alloc] initWithString:committed attributes:bright]];
+    if (tentative.length) {
+        if (committed.length && ![committed hasSuffix:@" "] && ![tentative hasPrefix:@" "])
+            [s appendAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:dim]];
+        [s appendAttributedString:[[NSAttributedString alloc] initWithString:tentative attributes:dim]];
+    }
+    return s;
+}
+
+// Lays the caption out for its current text and places it next to where the
+// pill rests (baseOrigin, not the sliding frame, so it does not bob with the
+// pill's arrival spring), kept fully on the pill's screen.
+static void layoutCaption(void) {
+    NSAttributedString *t = capView->text;
+    double lineH = ceil([captionFont() ascender] - [captionFont() descender] + [captionFont() leading]);
+    NSRect one = [t boundingRectWithSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX) options:NSStringDrawingUsesLineFragmentOrigin];
+    double textW = fmin(ceil(one.size.width) + 1, CAP_MAX_W - 2 * CAP_PAD_X);
+    NSRect full = [t boundingRectWithSize:NSMakeSize(textW, CGFLOAT_MAX) options:NSStringDrawingUsesLineFragmentOrigin];
+    capView->textH = ceil(full.size.height);
+    double visH = fmin(fmax(capView->textH, lineH), lineH * CAP_MAX_LINES);
+    double w = textW + 2 * CAP_PAD_X, h = visH + 2 * CAP_PAD_Y;
+
+    NSRect pill = panel ? [panel frame] : NSMakeRect(0, 0, PILL_LONG, PILL_SHORT);
+    double pw = pill.size.width, ph = pill.size.height;
+    double px = baseOrigin.x, py = baseOrigin.y;
+    NSPoint o;
+    switch (position) {
+        case POS_TOP:   o = NSMakePoint(px + pw / 2 - w / 2, py - CAP_GAP - h); break;
+        case POS_LEFT:  o = NSMakePoint(px + pw + CAP_GAP, py + ph / 2 - h / 2); break;
+        case POS_RIGHT: o = NSMakePoint(px - CAP_GAP - w, py + ph / 2 - h / 2); break;
+        default:        o = NSMakePoint(px + pw / 2 - w / 2, py + ph + CAP_GAP); break;
+    }
+    NSScreen *scr = targetScreen ? targetScreen : [NSScreen mainScreen];
+    NSRect sf = [scr frame];
+    o.x = fmax(NSMinX(sf) + EDGE_GAP, fmin(o.x, NSMaxX(sf) - EDGE_GAP - w));
+    o.y = fmax(NSMinY(sf) + EDGE_GAP, fmin(o.y, NSMaxY(sf) - topInset(scr) - EDGE_GAP - h));
+    [capPanel setFrame:NSMakeRect(o.x, o.y, w, h) display:NO];
+    [capView setNeedsDisplay:YES];
+}
+
+void flowlite_overlay_set_live_text(const char *committed, const char *tentative) {
+    @autoreleasepool {
+        NSString *c = committed ? [NSString stringWithUTF8String:committed] : @"";
+        NSString *t = tentative ? [NSString stringWithUTF8String:tentative] : @"";
+        if (!c.length && !t.length) return;
+        if (view && view->historyOpen) return; // the history panel owns the screen
+        ensureCaption();
+        capView->text = captionString(c, t);
+        layoutCaption();
+        if (!capUp) {
+            capUp = YES;
+            capGen++;
+            applyTraits(capPanel);
+            [capPanel setAlphaValue:0];
+            [capPanel orderFrontRegardless];
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+                ctx.duration = CAP_FADE_IN;
+                [[capPanel animator] setAlphaValue:1];
+            } completionHandler:nil];
+        }
+    }
+}
+
+void flowlite_overlay_hide_live_text(void) {
+    @autoreleasepool {
+        if (!capPanel || !capUp) return;
+        capUp = NO;
+        unsigned gen = capGen;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = CAP_FADE_OUT;
+            [[capPanel animator] setAlphaValue:0];
+        } completionHandler:^{
+            if (capGen == gen && !capUp) {
+                [capPanel orderOut:nil];
+                capView->text = nil;
+            }
+        }];
+    }
+}
+
+// flowlite_overlay_snapshot_caption renders the caption as it is now, the
+// same way flowlite_overlay_snapshot renders the pill.
+bool flowlite_overlay_snapshot_caption(const char *path) {
+    @autoreleasepool {
+        if (!capView) return false;
+        [capView displayIfNeeded];
+        NSBitmapImageRep *rep = [capView bitmapImageRepForCachingDisplayInRect:[capView bounds]];
+        if (!rep) return false;
+        [capView cacheDisplayInRect:[capView bounds] toBitmapImageRep:rep];
         NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         return [png writeToFile:[NSString stringWithUTF8String:path] atomically:YES];
     }

@@ -9,8 +9,10 @@ import (
 
 	"github.com/schollz/progressbar/v3"
 
+	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
+	"github.com/sanke08/flowlite/internal/engine"
 )
 
 // switchModel implements the one-model rule: fetch m if needed, make it
@@ -32,6 +34,9 @@ func switchModel(cfg *config.Config, m catalog.Model) error {
 		return err
 	}
 	fmt.Printf("%s active model: %s\n", ok("✓"), m.Label)
+	if m.Engine == catalog.Transcribe {
+		prepareMoonshine(m)
+	}
 
 	removed, err := catalog.PruneExcept(m.Key)
 	for _, r := range removed {
@@ -88,4 +93,32 @@ func downloadWithBar(m catalog.Model) error {
 	}
 	fmt.Printf("%s %s downloaded (%s)\n", ok("✓"), m.Label, catalog.Human(m.DiskBytes()))
 	return nil
+}
+
+// liveTag marks the models that stream, in the model lists.
+func liveTag(m catalog.Model) string {
+	if m.Streaming {
+		return "live"
+	}
+	return ""
+}
+
+// prepareMoonshine loads the model once, right after it is chosen. The very
+// first Moonshine load on a Mac compiles its GPU shaders, which takes about
+// half a minute; doing it here, under a spinner, means the first dictation
+// does not sit through it. macOS caches the result, so later loads are fast.
+func prepareMoonshine(m catalog.Model) {
+	spin := startSpinner("preparing " + m.Label + " for this Mac (first time can take ~30 s)…")
+	t0 := time.Now()
+	e, err := engine.Load(m)
+	if err == nil {
+		_, err = e.Transcribe(make([]float32, audio.SampleRate), engine.Options{})
+		e.Close()
+	}
+	if err != nil {
+		spin.Stop()
+		fmt.Println(warn("  could not load " + m.Label + ": " + err.Error()))
+		return
+	}
+	spin.Done(fmt.Sprintf("%s ready (%s)", m.Label, time.Since(t0).Round(time.Millisecond)))
 }

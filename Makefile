@@ -1,7 +1,9 @@
 # FlowLite — build, test, install.
 #
 # whisper.cpp comes from Homebrew on macOS and is found through pkg-config,
-# so a plain `go build` works once `brew install whisper-cpp` has run.
+# so a plain `go build` works once `brew install whisper-cpp` has run — but
+# leaves out the Moonshine models. `make build` and `make release` also
+# build transcribe.cpp (once, ~1 min, needs cmake) and put them in.
 
 BINARY   := flowlite
 MODULE   := github.com/sanke08/flowlite
@@ -25,14 +27,30 @@ LDFLAGS    = -s -w \
   -X $(MODULE)/internal/cli.WhisperVersion=$(WHISPERV)
 # Homebrew's bin is already on PATH and user-writable on Apple Silicon, so
 # `make install` needs no sudo there.
+# An ad-hoc signature's default designated requirement is the binary's own
+# code hash, which changes with every build — and macOS pins the Accessibility
+# grant to it, so every update silently invalidated the grant. Naming the
+# identifier instead keeps the grant valid across updates.
+CODESIGN_DR := designated => identifier "com.sanke08.flowlite"
 PREFIX   ?= $(shell test -w /opt/homebrew/bin && echo /opt/homebrew || echo /usr/local)
 
-.PHONY: infoplist all build test install uninstall clean deps windows whisper-static release publish dev run restart
+.PHONY: infoplist all build test test-moonshine install uninstall clean deps windows whisper-static transcribe-static release publish dev run restart
 
 all: build
 
 deps:            ## Install native dependencies (macOS)
 	brew list whisper-cpp >/dev/null 2>&1 || brew install whisper-cpp
+
+# ---- Moonshine (transcribe.cpp) ---------------------------------------------
+# One private static archive (see scripts/build-transcribe.sh), shared by the
+# dev build and the release. Space-free location for cgo.
+include third_party/transcribe-version.mk
+TCPP_DIR     := $(HOME)/.cache/flowlite-transcribe
+TCPP_CFLAGS  := -I$(TCPP_DIR)/src/include
+TCPP_LDFLAGS := $(TCPP_DIR)/private/libtranscribe_private.a -framework Metal -framework MetalKit -framework Foundation -framework Accelerate -lc++
+
+transcribe-static: ## Build transcribe.cpp for the Moonshine models (needs cmake)
+	@test "$$(cat $(TCPP_DIR)/private/tag 2>/dev/null)" = "$(TCPP_TAG)" || scripts/build-transcribe.sh $(TCPP_DIR)
 
 # The Info.plist embedded in the binary: the launchd-run daemon asks for the
 # microphone as flowlite itself, which needs a usage string. Copied to a
@@ -44,14 +62,18 @@ infoplist:
 	@mkdir -p $(HOME)/.cache
 	@cp packaging/macos/Info.plist $(INFOPLIST)
 
-build: infoplist ## Build ./bin/flowlite
+build: transcribe-static infoplist ## Build ./bin/flowlite
 	@mkdir -p bin
-	CGO_ENABLED=1 CGO_LDFLAGS="-O2 -g $(PLIST_LDFLAGS)" go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/flowlite
-	@codesign --force --sign - --identifier com.sanke08.flowlite bin/$(BINARY) 2>/dev/null || true
+	CGO_ENABLED=1 CGO_CFLAGS="-O2 -g $(TCPP_CFLAGS)" CGO_LDFLAGS="-O2 -g $(TCPP_LDFLAGS) $(PLIST_LDFLAGS)" \
+	go build -tags moonshine -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/flowlite
+	@codesign --force --sign - --identifier com.sanke08.flowlite -r='$(CODESIGN_DR)' bin/$(BINARY) 2>/dev/null || true
 	@echo "built bin/$(BINARY) ($(VERSION))"
 
 test:            ## Unit tests (pure Go; no mic, model or permissions needed)
 	go test ./...
+
+test-moonshine: transcribe-static ## The same tests with the Moonshine engine compiled in
+	CGO_CFLAGS="-O2 -g $(TCPP_CFLAGS)" CGO_LDFLAGS="-O2 -g $(TCPP_LDFLAGS)" go test -tags moonshine ./...
 
 install: release ## Install the self-contained binary to $(PREFIX)/bin
 	install -d $(PREFIX)/bin
@@ -140,14 +162,14 @@ whisper-static:   ## Build whisper.cpp as static libs with Metal (needs cmake)
 	  cmake --build $(WCPP)/build -j )
 
 release: WHISPERV := $(WCPP_TAG)
-release: whisper-static infoplist   ## One shareable file: dist/flowlite-<version>-macos-arm64
+release: whisper-static transcribe-static infoplist   ## One shareable file: dist/flowlite-<version>-macos-arm64
 	@mkdir -p $(HOME)/.cache dist
 	@ln -sfn "$(CURDIR)/$(WCPP)" $(WCPP_LNK)
 	CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) \
-	CGO_CFLAGS="-mmacosx-version-min=$(MACOS_MIN) -I$(WCPP_LNK)/include -I$(WCPP_LNK)/ggml/include" \
-	CGO_LDFLAGS="-mmacosx-version-min=$(MACOS_MIN) $(STATIC_LIBS) -framework Metal -framework MetalKit -framework Foundation -framework Accelerate -lc++ $(PLIST_LDFLAGS)" \
-	go build -tags static -trimpath -ldflags '$(LDFLAGS)' -o $(RELEASE) ./cmd/flowlite
-	@codesign --force --sign - --identifier com.sanke08.flowlite $(RELEASE) 2>/dev/null || true
+	CGO_CFLAGS="-mmacosx-version-min=$(MACOS_MIN) -I$(WCPP_LNK)/include -I$(WCPP_LNK)/ggml/include $(TCPP_CFLAGS)" \
+	CGO_LDFLAGS="-mmacosx-version-min=$(MACOS_MIN) $(STATIC_LIBS) $(TCPP_DIR)/private/libtranscribe_private.a -framework Metal -framework MetalKit -framework Foundation -framework Accelerate -lc++ $(PLIST_LDFLAGS)" \
+	go build -tags "static moonshine" -trimpath -ldflags '$(LDFLAGS)' -o $(RELEASE) ./cmd/flowlite
+	@codesign --force --sign - --identifier com.sanke08.flowlite -r='$(CODESIGN_DR)' $(RELEASE) 2>/dev/null || true
 	@echo "release: $(RELEASE) ($$(du -h $(RELEASE) | cut -f1)), minimum macOS $$(otool -l $(RELEASE) | grep -A3 LC_BUILD_VERSION | awk '/minos/{print $$2}') — depends only on macOS system libraries:"
 	@otool -L $(RELEASE) | grep -vE "^dist|/usr/lib/|/System/" | sed 's/^/  UNEXPECTED: /' || true
 

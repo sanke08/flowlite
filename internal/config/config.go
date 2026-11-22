@@ -37,7 +37,25 @@ type Config struct {
 	PillPosition            string  `json:"pill_position"`   // screen edge the pill sits on: bottom, top, left, right
 	HistoryEnabled          bool    `json:"history_enabled"` // whether transcripts are remembered at all
 	UpdateRestart           bool    `json:"update_restart"`  // Windows: stop and restart the daemon so `flowlite update` can replace the locked exe
+	// LiveTranscription puts the words where they are going while the user
+	// is still speaking. The final text is unaffected: it always comes from
+	// one full pass over the whole recording on release.
+	LiveTranscription bool `json:"live_transcription"`
+	// LiveStyle is how live words appear: LiveType ("" — the default) types
+	// them into the focused field as they settle and corrects them on
+	// release; LiveCaption shows them in a caption next to the pill and
+	// pastes on release, as without live transcription.
+	LiveStyle string `json:"live_style,omitempty"`
 }
+
+// Live transcription styles; see Config.LiveStyle.
+const (
+	LiveType    = ""
+	LiveCaption = "caption"
+)
+
+// LiveTyping reports whether live words are typed into the focused field.
+func (c *Config) LiveTyping() bool { return c.LiveTranscription && c.LiveStyle != LiveCaption }
 
 // Default is a fresh, unconfigured settings object.
 func Default() *Config {
@@ -67,13 +85,28 @@ func Dir() (string, error) {
 	return d, os.MkdirAll(d, 0o755)
 }
 
-// ModelsDir returns (and creates) where GGML files live.
-func ModelsDir() (string, error) {
+// ModelsDir returns (and creates) where whisper.cpp's GGML files live.
+func ModelsDir() (string, error) { return EngineModelsDir("whispercpp") }
+
+// EngineModelsDir returns (and creates) the models folder for one speech
+// engine, so two engines' files can never collide or be mistaken for each
+// other's.
+func EngineModelsDir(engine string) (string, error) {
+	d, err := ModelsRoot()
+	if err != nil {
+		return "", err
+	}
+	m := filepath.Join(d, engine)
+	return m, os.MkdirAll(m, 0o755)
+}
+
+// ModelsRoot returns (and creates) the folder holding every engine's models.
+func ModelsRoot() (string, error) {
 	d, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	m := filepath.Join(d, "models", "whispercpp")
+	m := filepath.Join(d, "models")
 	return m, os.MkdirAll(m, 0o755)
 }
 
@@ -145,6 +178,9 @@ func Load() (*Config, error) {
 	}
 	if !hotkey.Valid(c.Hotkey) {
 		c.Hotkey = hotkey.DefaultName()
+	}
+	if c.LiveStyle != LiveCaption {
+		c.LiveStyle = LiveType
 	}
 	switch c.PillPosition {
 	case "bottom", "top", "left", "right":

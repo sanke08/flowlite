@@ -27,6 +27,17 @@ func ownPermissions(request bool) (ax bool, mic permissions.MicStatus, err error
 	if os.Getenv(backgroundEnv) == "1" {
 		return permissions.Trusted(), permissions.Mic(), nil // already the daemon's context
 	}
+	if request {
+		// An Accessibility row left by an earlier build is switched on in
+		// System Settings but no longer matches this binary (the grant is
+		// pinned to its code hash), and macOS does not prompt again while a
+		// row exists — so the user is stuck with a switch that does nothing.
+		// When the grant is not valid, drop FlowLite's row so the request
+		// below adds a fresh one. A working grant is never touched.
+		if ok, _, err := ownPermissions(false); err == nil && !ok {
+			resetAccessibilityGrant()
+		}
+	}
 	app, err := ensureAppBundle()
 	if err != nil {
 		return false, 0, err
@@ -64,4 +75,11 @@ func ownPermissions(request bool) (ax bool, mic permissions.MicStatus, err error
 		}
 	}
 	return false, 0, fmt.Errorf("the permission check did not answer")
+}
+
+// resetAccessibilityGrant removes FlowLite's own Accessibility entry (by bundle
+// id, so nothing else's) from macOS's privacy database. Best effort: if it
+// fails the prompt simply behaves as it did before.
+func resetAccessibilityGrant() {
+	_ = exec.Command("tccutil", "reset", "Accessibility", appBundleID).Run()
 }

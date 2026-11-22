@@ -4,9 +4,12 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,11 +34,9 @@ import (
 // that quits the same way Terminal does: a launchd job it bootstrapped was
 // removed; an app it opened kept running.
 //
-// FlowLite.app lives in the config directory and is rebuilt on every start:
-// an Info.plist (hidden, no Dock icon) and Contents/MacOS/flowlite, a symlink
-// to this binary, so an update in place is picked up without touching it.
-// macOS judges its permissions as the same flowlite as before — the
-// Accessibility and microphone grants carry over.
+// FlowLite.app lives in the config directory and is refreshed on every start:
+// an Info.plist (hidden, no Dock icon) and Contents/MacOS/flowlite, a signed
+// copy of this binary (see ensureAppBundle for why a copy and not a symlink).
 
 const (
 	appBundleName  = "FlowLite.app"
@@ -114,7 +115,77 @@ func openDaemonCmd(wait bool) (*exec.Cmd, error) {
 }
 
 // ensureAppBundle (re)writes FlowLite.app and returns its path.
+//
+// Contents/MacOS/flowlite is a real, signed copy of the installed binary — not
+// a symlink to it. macOS keys a permission grant by what the process is: an
+// executable outside any bundle is keyed by its path (and its Accessibility
+// row by the exact build's code hash), which `tccutil` cannot clear, so a
+// stale row after an update could only be removed by hand in System Settings.
+// An executable inside a bundle is keyed by the bundle id, which can be reset
+// (see resetAccessibilityGrant). The bundle is signed as a whole — macOS
+// refuses the microphone to a bundle whose Info.plist the signature does not
+// cover — with a requirement that names only the identifier, so the grant
+// does not name one build's code hash. It is rebuilt whenever the installed
+// binary or the Info.plist changes, by whichever process runs this next.
 func ensureAppBundle() (string, error) {
+	d, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	app := filepath.Join(d, appBundleName)
+	macos := filepath.Join(app, "Contents", "MacOS")
+	res := filepath.Join(app, "Contents", "Resources")
+	for _, dir := range []string{macos, res} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	src, err := installedExe(app)
+	if err != nil {
+		return "", err
+	}
+	sum, err := fileSum(src)
+	if err != nil {
+		return "", err
+	}
+
+	plist := appInfoPlist()
+	pp := filepath.Join(app, "Contents", "Info.plist")
+	dst := filepath.Join(macos, "flowlite")
+	sp := filepath.Join(res, "source")
+	// The stamp records which binary the copy was made from: signing rewrites
+	// the copy, so it can no longer be compared with the source byte for byte.
+	stamp := src + "\n" + sum + "\n"
+	curPlist, _ := os.ReadFile(pp)
+	curStamp, _ := os.ReadFile(sp)
+	fi, statErr := os.Lstat(dst)
+	if bytes.Equal(curPlist, plist) && string(curStamp) == stamp &&
+		statErr == nil && fi.Mode().IsRegular() {
+		return app, nil
+	}
+
+	if err := os.WriteFile(pp, plist, 0o644); err != nil {
+		return "", err
+	}
+	_ = os.Remove(dst) // also drops the earlier layout's symlink to the binary
+	if err := copyExecutable(src, dst); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(sp, []byte(stamp), 0o644); err != nil {
+		return "", err
+	}
+	if out, err := exec.Command("codesign", "--force", "--sign", "-",
+		"--identifier", appBundleID,
+		"-r="+`designated => identifier "`+appBundleID+`"`, app).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("sign %s: %v: %s", appBundleName, err, strings.TrimSpace(string(out)))
+	}
+	return app, nil
+}
+
+// installedExe is the flowlite binary on disk that FlowLite.app is a copy of:
+// this process's own executable, or — when this process *is* the copy inside
+// the bundle, as the daemon is — wherever that copy came from.
+func installedExe(app string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -122,32 +193,44 @@ func ensureAppBundle() (string, error) {
 	if r, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = r
 	}
-	d, err := config.Dir()
+	if filepath.Dir(exe) == filepath.Join(app, "Contents", "MacOS") {
+		b, err := os.ReadFile(filepath.Join(app, "Contents", "Resources", "source"))
+		path, _, _ := strings.Cut(string(b), "\n")
+		if err != nil || path == "" {
+			return "", fmt.Errorf("cannot tell where FlowLite.app's binary came from: %v", err)
+		}
+		return path, nil
+	}
+	return exe, nil
+}
+
+// fileSum is the hex SHA-256 of a file.
+func fileSum(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	app := filepath.Join(d, appBundleName)
-	macos := filepath.Join(app, "Contents", "MacOS")
-	if err := os.MkdirAll(macos, 0o755); err != nil {
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
-	plist := appInfoPlist()
-	pp := filepath.Join(app, "Contents", "Info.plist")
-	if cur, err := os.ReadFile(pp); err != nil || !bytes.Equal(cur, plist) {
-		if err := os.WriteFile(pp, plist, 0o644); err != nil {
-			return "", err
-		}
+// copyExecutable writes src to dst through a temp file and a rename, so a
+// daemon still running the old copy keeps its inode and nothing sees half a
+// binary.
+func copyExecutable(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
 	}
-
-	link := filepath.Join(macos, "flowlite")
-	if cur, err := os.Readlink(link); err != nil || cur != exe {
-		_ = os.Remove(link)
-		if err := os.Symlink(exe, link); err != nil {
-			return "", err
-		}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o755); err != nil {
+		return err
 	}
-	return app, nil
+	return os.Rename(tmp, dst)
 }
 
 func appInfoPlist() []byte {

@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/sanke08/flowlite/main/install.sh | 
 > See [Windows (experimental)](#windows-experimental) — the Windows build is
 > untested on real hardware.
 
-What it does: downloads a single 12 MB program, puts it where your terminal
+What it does: downloads a single 18 MB program, puts it where your terminal
 can find it, and starts `flowlite`, which runs the setup wizard. If you'd
 rather see the file first, it is here:
 <https://github.com/sanke08/flowlite/releases/latest>.
@@ -248,7 +248,8 @@ keyboard permission. There is nothing to restart.
 
 | row | what it is |
 | --- | --- |
-| Speech model ⟳ | which Whisper model — see below |
+| Speech model ⟳ | which Whisper or Moonshine model — see below |
+| Live transcription ⟳ | off by default. On: your words appear in a caption next to the pill while you speak; what gets pasted is unchanged |
 | Dictation key ⟳ | Right Option by default. Press any key — or up to 3 held together, like Fn + Control — and Enter saves it |
 | Hold threshold ⟳ | how long a press must last to count as a hold rather than a tap (400 ms) |
 | Pill position ⟳ | bottom, top, left or right edge — with a live preview |
@@ -274,10 +275,22 @@ removes the old one.
 | **large-v3-turbo-q5** | **547 MB** | **the default** — 99 languages, accents, ~1.5 s |
 | large-v3-turbo | 1.5 GB | uncompressed version of the above |
 | large-v3 | 2.9 GB | maximum accuracy, several times slower |
+| moonshine-base | 77 MB | English only, light and quick |
+| moonshine-streaming-tiny | 50 MB | English only, live — smallest |
+| **moonshine-streaming-small** | **199 MB** | **best for Live transcription** — English only, words appear as you speak |
+| moonshine-streaming-medium | 296 MB | English only, live, most accurate; more memory while you talk |
 
-**FlowLite keeps exactly one model on disk.** Switching downloads the new one
-first and deletes the old one only once the new file is complete — so an
-interrupted download never leaves you without a working model.
+Models marked **live** in the list stream: with Live transcription on, the
+caption follows your voice. Whisper models work with Live transcription too —
+the caption re-reads the last few seconds about every half second, so it
+trails a little. The first Moonshine load on a Mac prepares the GPU once
+(~30 s); FlowLite does it right after the download.
+
+**FlowLite keeps exactly one model on disk** — Whisper or Moonshine, never
+both. Switching downloads the new one first and deletes the old one only once
+the new file is complete — so an interrupted download never leaves you without
+a working model. Only one download runs at a time: picking a model while
+another window is downloading stops that download and deletes its partial file.
 
 ---
 
@@ -407,11 +420,15 @@ The default key is Right Control.
 ```bash
 brew install cmake
 git clone https://github.com/sanke08/flowlite && cd flowlite
-make install       # static whisper.cpp + Go build → /opt/homebrew/bin/flowlite
+make install       # static whisper.cpp + transcribe.cpp + Go build → /opt/homebrew/bin/flowlite
 ```
 
 Needs Go 1.26. `make build` is the quick developer build that links against
 Homebrew's `whisper-cpp` (`brew install whisper-cpp`) instead of compiling it.
+Both also build transcribe.cpp (the Moonshine engine) once, into
+`~/.cache/flowlite-transcribe` — about a minute, with cmake. A plain `go build`
+still works and simply leaves the Moonshine models out; `make test-moonshine`
+runs the tests with them in.
 `make test` runs the unit tests; the whisper test additionally loads whatever
 model is installed and asserts Metal was used.
 
@@ -462,7 +479,10 @@ needs a fresh AppKit main loop).
 | global key press, tap-vs-hold decision | `internal/hotkey` — CGEventTap on macOS, WH_KEYBOARD_LL on Windows; the state machine is pure Go and tested |
 | microphone at 16 kHz mono | `internal/audio` (miniaudio) |
 | silence gate, hallucination filter | `internal/speech` |
+| speech engines | `internal/engine` — one interface over both libraries, plus pause-based splitting for Moonshine |
 | Whisper inference | `internal/whisper` — a thin cgo wrapper over `whisper.h`; loads ggml's backend plugins explicitly |
+| Moonshine inference | `internal/transcribe` — cgo over transcribe.cpp, linked as one archive whose ggml is private so it cannot clash with whisper.cpp's |
+| live transcription | `internal/daemon/live.go` (preview loop) and the caption in `internal/overlay` |
 | the pill | `internal/overlay` — NSPanel + Core Graphics / layered GDI window |
 | audio cues | `internal/sound` — synthesised, one persistent output stream |
 | paste | `internal/inject` — clipboard + ⌘V / Ctrl+V keystroke, clipboard restored after |
@@ -470,8 +490,9 @@ needs a fresh AppKit main loop).
 | orchestration | `internal/daemon` |
 | commands | `internal/cli` |
 
-The macOS release binary statically links whisper.cpp and ggml with the Metal
-library embedded, targets macOS 13+, and depends only on system frameworks.
+The macOS release binary statically links whisper.cpp, transcribe.cpp and
+their (separate) ggml builds with the Metal libraries embedded, targets macOS
+13+, and depends only on system frameworks.
 
 ### Versioning and releases
 

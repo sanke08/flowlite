@@ -16,6 +16,7 @@ import (
 	"github.com/sanke08/flowlite/internal/audio"
 	"github.com/sanke08/flowlite/internal/catalog"
 	"github.com/sanke08/flowlite/internal/config"
+	"github.com/sanke08/flowlite/internal/engine"
 	"github.com/sanke08/flowlite/internal/history"
 	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/inject"
@@ -24,7 +25,6 @@ import (
 	"github.com/sanke08/flowlite/internal/permissions"
 	"github.com/sanke08/flowlite/internal/sound"
 	"github.com/sanke08/flowlite/internal/speech"
-	"github.com/sanke08/flowlite/internal/whisper"
 )
 
 // State is where the daemon is in a dictation.
@@ -52,14 +52,17 @@ type Daemon struct {
 	cfg *config.Config
 	log *log.Logger
 
-	model   *whisper.Model
-	rec     *audio.Recorder
-	player  *sound.Player
-	machine *hotkey.Machine
-	events  chan hotkey.KeyEvent
-	micErr  chan uint64 // recGen of a start() whose microphone failed to open
-	tap     *hotkey.Tap
-	hist    *history.Store // nil when the history file cannot be opened
+	model engine.Engine
+	// streaming is true when model can transcribe audio as it arrives;
+	// live transcription then follows the voice instead of re-reading.
+	streaming bool
+	rec       *audio.Recorder
+	player    *sound.Player
+	machine   *hotkey.Machine
+	events    chan hotkey.KeyEvent
+	micErr    chan uint64 // recGen of a start() whose microphone failed to open
+	tap       *hotkey.Tap
+	hist      *history.Store // nil when the history file cannot be opened
 
 	mu    sync.Mutex
 	state State
@@ -93,6 +96,9 @@ type Daemon struct {
 
 	busy sync.Mutex // serialises transcriptions and paste-last against Close
 
+	// live is the running live-transcription preview, or nil; see live.go.
+	live atomic.Pointer[liveSession]
+
 	// silence times the trailing quiet of a hands-free recording so tick can
 	// stop it on its own (see cfg.HandsFreeSilenceSeconds). Reset on every
 	// start(); only consulted while the machine is in HandsFree.
@@ -124,27 +130,27 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 	if !ok || !m.Downloaded() {
 		return nil, errors.New("no model installed — run `flowlite` to set one up")
 	}
-	path, err := m.Path()
-	if err != nil {
-		return nil, err
-	}
 
 	t0 := time.Now()
-	model, err := whisper.Load(path)
+	model, err := engine.Load(m)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", m.Label, err)
 	}
 	// Warm-up pays for Metal pipeline compilation now, not on the first
 	// real dictation.
-	if _, err := model.Transcribe(make([]float32, audio.SampleRate), whisper.Options{}); err != nil {
+	if _, err := model.Transcribe(make([]float32, audio.SampleRate), engine.Options{}); err != nil {
 		model.Close()
 		return nil, fmt.Errorf("warm-up: %w", err)
 	}
-	dev := "CPU"
-	if whisper.UsingMetal() {
-		dev = "Metal GPU " + whisper.GPUName()
+	logger.Printf("model %s ready on %s in %s", m.Label, model.Device(), time.Since(t0).Round(time.Millisecond))
+	_, streaming := model.(engine.Streamer)
+	if cfg.LiveTranscription {
+		how := "re-reading the recent audio"
+		if streaming {
+			how = "streaming"
+		}
+		logger.Printf("live transcription on (%s)", how)
 	}
-	logger.Printf("model %s ready on %s in %s", m.Label, dev, time.Since(t0).Round(time.Millisecond))
 
 	// Open the microphone (stopped) before the sound Player opens its output
 	// stream: see audio.Recorder for why the capture unit's first open must
@@ -169,16 +175,17 @@ func New(cfg *config.Config, logger *log.Logger) (*Daemon, error) {
 	overlay.SetPosition(cfg.PillPosition)
 
 	d := &Daemon{
-		cfg:     cfg,
-		log:     logger,
-		model:   model,
-		rec:     rec,
-		player:  player,
-		machine: hotkey.New(time.Duration(cfg.HoldThresholdMS) * time.Millisecond),
-		events:  make(chan hotkey.KeyEvent, 64),
-		micErr:  make(chan uint64, 4),
-		hist:    hist,
-		done:    make(chan struct{}),
+		cfg:       cfg,
+		log:       logger,
+		model:     model,
+		streaming: streaming,
+		rec:       rec,
+		player:    player,
+		machine:   hotkey.New(time.Duration(cfg.HoldThresholdMS) * time.Millisecond),
+		events:    make(chan hotkey.KeyEvent, 64),
+		micErr:    make(chan uint64, 4),
+		hist:      hist,
+		done:      make(chan struct{}),
 	}
 	mainloop.OnWake(d.wake)
 	return d, nil
@@ -254,6 +261,12 @@ func (d *Daemon) Close() {
 	if d.rec.Recording() {
 		d.rec.Cancel()
 	}
+	// A live preview is the one other user of the model; stop it and wait,
+	// so it cannot start a pass against the model about to be freed.
+	if l := d.detachLive(); l != nil {
+		<-l.done
+		l.release()
+	}
 	// Tell a transcription in flight to stop short of pasting. The user has
 	// quit; dropping text into whatever window they switch to a second later
 	// is worse than not pasting at all. It is still written to history, so a
@@ -278,6 +291,7 @@ func (d *Daemon) Close() {
 	// and closing them first is a race against a goroutine we just waited for.
 	d.player.Close()
 	d.rec.Close()
+	overlay.HideLiveText()
 	overlay.Hide()
 }
 
@@ -294,6 +308,9 @@ func (d *Daemon) setState(s State) {
 	d.state = s
 	d.mu.Unlock()
 }
+
+// Device says where the model runs, e.g. "Metal GPU Apple M3".
+func (d *Daemon) Device() string { return d.model.Device() }
 
 // State is the current phase, for `status`-style reporting.
 func (d *Daemon) State() State { return d.getState() }
@@ -359,6 +376,7 @@ func (d *Daemon) start() {
 	case Recording:
 		// A stale, never-confirmed recording (the machine missed an
 		// Expire); replace it with this fresh gesture.
+		d.endLive()
 		d.rec.Cancel()
 		d.setState(Idle)
 	}
@@ -395,6 +413,7 @@ func (d *Daemon) micFailed(gen uint64) {
 		return
 	}
 	d.machine.Reset()
+	d.endLive()
 	d.setState(Idle)
 	d.show(overlay.Error, "Microphone unavailable")
 	d.player.Play(sound.Error)
@@ -411,12 +430,19 @@ func (d *Daemon) confirm() {
 	}
 	d.player.Play(sound.Start)
 	d.show(overlay.Listening, "")
+	if d.cfg.LiveTranscription {
+		d.beginLive()
+	}
 }
 
 func (d *Daemon) finish() {
 	if d.closed.Load() || d.getState() != Recording {
 		return
 	}
+	// Stop the preview before the final pass: the pass waits for the
+	// preview to let go of the model (see transcribe), and the caption
+	// stays up showing the last preview until the pill settles.
+	live := d.detachLive()
 	samples := d.rec.Stop()
 	d.setState(Transcribing)
 	d.player.Play(sound.Stop)
@@ -425,6 +451,9 @@ func (d *Daemon) finish() {
 	}
 
 	if !speech.HasSpeech(samples) {
+		if live != nil {
+			d.erase(live) // whatever it typed was not speech after all
+		}
 		// Silence and a revoked microphone are indistinguishable in the
 		// samples, so check which one it was before blaming the user.
 		if st := permissions.Mic(); !st.OK() {
@@ -437,7 +466,7 @@ func (d *Daemon) finish() {
 	}
 	overlay.SetState(overlay.Transcribing, "Transcribing…")
 	d.player.StartWorking()
-	go d.transcribe(samples)
+	go d.transcribe(samples, live)
 }
 
 // discard drops a recording nobody was told about: a lone tap, or Esc
@@ -446,6 +475,7 @@ func (d *Daemon) discard() {
 	if d.getState() != Recording {
 		return
 	}
+	d.endLive()
 	d.rec.Cancel()
 	d.setState(Idle)
 }
@@ -454,6 +484,7 @@ func (d *Daemon) cancel() {
 	if d.getState() != Recording {
 		return
 	}
+	d.eraseLive() // Esc takes back anything live transcription typed
 	d.rec.Cancel()
 	d.setState(Transcribing) // block a new start until the pill settles
 	if !d.pillUp.Load() {
@@ -472,6 +503,7 @@ func (d *Daemon) pasteLast() {
 	case Transcribing:
 		return // the pill is busy; the machine is already idle
 	case Recording:
+		d.endLive()
 		d.rec.Cancel() // the sliver captured during the taps
 	}
 	d.setState(Transcribing) // hold off a new start until the pill settles
@@ -545,21 +577,38 @@ func (d *Daemon) pasteLastNow(last history.Entry) {
 	d.setState(Idle)
 }
 
-func (d *Daemon) transcribe(samples []float32) {
+func (d *Daemon) transcribe(samples []float32, live *liveSession) {
 	d.busy.Lock()
 	defer d.busy.Unlock()
 
 	t0 := time.Now()
-	segs, err := d.model.Transcribe(samples, whisper.Options{Language: d.cfg.Language})
+	var text string
+	var err error
+	if live != nil {
+		// The preview was told to stop in finish; a pass it had in flight
+		// is aborted, so this wait is short.
+		<-live.done
+	}
+	if live != nil && live.stream != nil && live.fed <= len(samples) {
+		// A streaming model that typed as the user spoke: finish that same
+		// stream with the audio it has not had yet. It has heard everything,
+		// in pause-cut pieces, exactly as a fresh pass would — and ending on
+		// its own text leaves almost nothing in the field to correct.
+		text, err = live.stream.Finish(samples[live.fed:])
+		live.release()
+	} else {
+		if live != nil {
+			live.release()
+		}
+		text, err = d.model.Transcribe(samples, engine.Options{Language: d.cfg.Language})
+	}
 	d.player.StopWorking()
 	if d.closing.Load() {
 		// Shutting down. Keep the words, but do not paste them into whatever
 		// has focus now, and do not raise the pill after it has been hidden.
-		if err == nil {
-			if text := speech.Finalise(segs); text != "" {
-				d.remember(history.Entry{Time: time.Now(), Text: text})
-				d.log.Printf("shutting down: %d chars kept in history, not pasted", len(text))
-			}
+		if err == nil && text != "" {
+			d.remember(history.Entry{Time: time.Now(), Text: text})
+			d.log.Printf("shutting down: %d chars kept in history, not pasted", len(text))
 		}
 		return
 	}
@@ -568,8 +617,16 @@ func (d *Daemon) transcribe(samples []float32) {
 		d.settle(overlay.Error, "Transcription failed", sound.Error, holdError)
 		return
 	}
-	text := speech.Finalise(segs)
+	typed := ""
+	if live != nil && live.typing {
+		typed = live.typed // safe: live.done is closed
+	}
 	if text == "" {
+		if typed != "" {
+			// The full pass found nothing worth keeping (a filler the
+			// preview took for words); take back what was typed.
+			_ = inject.Backspace(len([]rune(typed)))
+		}
 		d.settle(overlay.Cancelled, "Nothing heard", sound.Cancel, holdCancelled)
 		return
 	}
@@ -578,9 +635,22 @@ func (d *Daemon) transcribe(samples []float32) {
 
 	label := "Pasted"
 	var pasteErr error
-	if d.NoPaste {
+	switch {
+	case d.NoPaste:
 		label = "Transcribed"
-	} else {
+	case typed != "":
+		// Live transcription already typed most of it: correct the typed
+		// words to the full pass's — usually just appending the last few —
+		// instead of pasting everything a second time.
+		label = "Typed"
+		back, insert := speech.Correction(typed, text)
+		if pasteErr = inject.Backspace(back); pasteErr == nil {
+			pasteErr = inject.Type(insert)
+		}
+		if back > 0 {
+			d.log.Printf("live: corrected %d typed characters", back)
+		}
+	default:
 		pasteErr = inject.Paste(text, d.cfg.RestoreClipboard)
 	}
 	// Every transcript is remembered, pasted or not, so a triple tap, or
@@ -601,6 +671,7 @@ func (d *Daemon) transcribe(samples []float32) {
 // settle shows a terminal pill state, plays its cue, and returns to Idle.
 func (d *Daemon) settle(s overlay.State, text string, cue sound.Cue, hold time.Duration) {
 	d.player.StopWorking()
+	overlay.HideLiveText()
 	overlay.SetState(s, text)
 	d.player.Play(cue)
 	d.hideAfter(hold)
@@ -642,6 +713,7 @@ func (d *Daemon) toggleHistory() {
 		return
 	}
 	if d.getState() == Recording {
+		d.endLive()
 		d.rec.Cancel()
 	}
 	d.setState(Idle)

@@ -21,7 +21,6 @@ import (
 	"github.com/sanke08/flowlite/internal/hotkey"
 	"github.com/sanke08/flowlite/internal/mainloop"
 	"github.com/sanke08/flowlite/internal/permissions"
-	"github.com/sanke08/flowlite/internal/whisper"
 )
 
 var startCmd = &cobra.Command{
@@ -143,7 +142,7 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 	defer signal.Stop(hup)
 
 	if !detached {
-		printBanner(cfg, noPaste)
+		printBanner(cfg, d.Device(), noPaste)
 	}
 
 	var runErr error
@@ -165,13 +164,13 @@ func runDaemon(cfg *config.Config, detached, noPaste bool) error {
 // printBanner is what the user sees while FlowLite listens: what is loaded,
 // the gestures, where settings live, and — at most once a day — whether a
 // newer release exists.
-func printBanner(cfg *config.Config, noPaste bool) {
+func printBanner(cfg *config.Config, device string, noPaste bool) {
 	model := cfg.Model
 	if m, have := catalog.Get(cfg.Model); have {
 		model = m.Label
 	}
 	engine := "CPU"
-	if whisper.UsingMetal() {
+	if strings.HasPrefix(device, "Metal") {
 		engine = "Metal"
 	}
 	key := hotkey.Label(cfg.Hotkey)

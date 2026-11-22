@@ -617,6 +617,12 @@ func Hide() {
 // Snapshot is not implemented on Windows.
 func Snapshot(path string) error { return nil }
 
+// The live-transcription caption is macOS-only for now; on Windows live
+// mode still runs (and the pasted text is the same), it just shows no words.
+func SetLiveText(committed, tentative string) {}
+func HideLiveText()                           {}
+func SnapshotCaption(path string) error       { return nil }
+
 // SnapshotWindow is not implemented on Windows.
 func SnapshotWindow(path string) error { return nil }
 

@@ -137,3 +137,22 @@ func ClipboardRoundTrip() error {
 func SetClipboard(text string) error {
 	return clipboardSet(text)
 }
+
+// Type sends text to the focused field as typed characters rather than a
+// paste, leaving the clipboard alone. Live transcription uses it to put words
+// in the field as they are spoken.
+func Type(text string) error {
+	if text == "" {
+		return nil
+	}
+	return typeText(text)
+}
+
+// Backspace deletes the n characters before the cursor, the way the user
+// would — used to take back live-typed words the final transcript changed.
+func Backspace(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	return backspace(n)
+}

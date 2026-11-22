@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 )
 
@@ -162,4 +163,45 @@ func pasteKeystroke() error {
 func clipboardSerial() uint64 {
 	n, _, _ := procClipSeqNumber.Call()
 	return uint64(n)
+}
+
+const (
+	keyEventFUnicode = 0x0004
+	vkBack           = 0x08
+)
+
+// typeText sends text as Unicode key packets — one down/up pair per UTF-16
+// unit, which is how Windows types characters no keyboard layout has.
+func typeText(text string) error {
+	units := utf16.Encode([]rune(text))
+	seq := make([]input, 0, 2*len(units))
+	for _, u := range units {
+		seq = append(seq,
+			input{typ: inputKeyboard, ki: keybdInput{wScan: u, dwFlags: keyEventFUnicode}},
+			input{typ: inputKeyboard, ki: keybdInput{wScan: u, dwFlags: keyEventFUnicode | keyEventFKeyUp}})
+	}
+	return sendInputs(seq, "the typed text")
+}
+
+func backspace(n int) error {
+	seq := make([]input, 0, 2*n)
+	for i := 0; i < n; i++ {
+		seq = append(seq,
+			input{typ: inputKeyboard, ki: keybdInput{wVk: vkBack}},
+			input{typ: inputKeyboard, ki: keybdInput{wVk: vkBack, dwFlags: keyEventFKeyUp}})
+	}
+	return sendInputs(seq, "the backspaces")
+}
+
+func sendInputs(seq []input, what string) error {
+	if len(seq) == 0 {
+		return nil
+	}
+	return pinned(func() error {
+		n, _, err := procSendInput.Call(uintptr(len(seq)), uintptr(unsafe.Pointer(&seq[0])), unsafe.Sizeof(seq[0]))
+		if int(n) != len(seq) {
+			return errors.Join(errors.New("SendInput did not deliver "+what), err)
+		}
+		return nil
+	})
 }
