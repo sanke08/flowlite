@@ -12,8 +12,16 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "FlowLite's one-line installer currently supports Apple Silicon Macs."; echo "Windows: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"; exit 1 ;;
 esac
 
+# --connect-timeout: a network that cannot reach GitHub should fail in seconds
+# with a message, not sit silent. (No --max-time: the download itself may
+# legitimately take a while on a slow link.)
+CURL="curl --connect-timeout 15"
+
 echo "FlowLite: finding the latest release…"
-RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
+RELEASE_JSON=$($CURL -fsSL "https://api.github.com/repos/$REPO/releases/latest") || {
+  echo "FlowLite: could not reach api.github.com — check your connection (or GitHub's rate limit) and try again." >&2
+  exit 1
+}
 URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep "$ASSET" | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
 [ -n "$URL" ] || { echo "no release asset found for $ASSET"; exit 1; }
 SUMS_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep "SHA256SUMS" | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
@@ -42,10 +50,15 @@ progress() {
   }' >&2
 }
 
-curl -fsSL "$URL" -o "$TMP" &
+: > "$TMP"
+$CURL -fsSL "$URL" -o "$TMP" &
 DL_PID=$!
-TOTAL=$(curl -sIL "$URL" 2>/dev/null | tr -d '\r' \
-  | awk 'tolower($1)=="content-length:" {n=$2} END {print n}')
+# The total comes from the release JSON we already have (the asset's "size",
+# which precedes its download URL) — no extra request, so the readout starts
+# at once instead of waiting on a separate HEAD round trip.
+TOTAL=$(echo "$RELEASE_JSON" | awk -v asset="$ASSET" '
+  /"size":/ { gsub(/[^0-9]/, "", $0); size = $0 }
+  /"browser_download_url"/ && index($0, asset) { print size; exit }')
 case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
 while kill -0 "$DL_PID" 2>/dev/null; do
   progress "$(file_size "$TMP" 2>/dev/null || echo 0)" "$TOTAL"
@@ -64,7 +77,7 @@ printf '\n' >&2
 
 echo "FlowLite: verifying checksum…"
 SUMS_TMP=$(mktemp -t flowlite-sums)
-if ! curl -fsSL "$SUMS_URL" -o "$SUMS_TMP"; then
+if ! $CURL -fsSL "$SUMS_URL" -o "$SUMS_TMP"; then
   echo "FlowLite: failed to download SHA256SUMS — refusing to install an unverified binary" >&2
   rm -f "$TMP" "$SUMS_TMP"
   exit 1

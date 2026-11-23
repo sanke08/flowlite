@@ -6,6 +6,13 @@
 extern void flowliteHistoryPick(int index);
 extern void flowliteHistoryClosed(void);
 
+// A hidden app draws none of its windows. FlowLite.app is opened by
+// LaunchServices, and a launch flag or the user's own Hide would otherwise
+// leave the pill ordered front but never on screen. Unhide before showing.
+static void flowliteEnsureAppVisible(void) {
+    if ([NSApp isHidden]) [NSApp unhide:nil];
+}
+
 // A small black capsule with no text, ever — with one narrow, deliberate
 // exception: a 1-3 word status label for the terminal Error state, since the
 // daemon runs detached with no terminal to explain a failure any other way.
@@ -496,6 +503,7 @@ static void rebuildPanel(void) {
     ensurePanel();
     reposition();
     [panel setAlphaValue:alpha];
+    flowliteEnsureAppVisible();
     [panel orderFrontRegardless];
 }
 
@@ -617,6 +625,7 @@ void flowlite_overlay_show(int state, const char *text) {
             reposition();
             applyTraits(panel);
             [panel setAlphaValue:0];
+            flowliteEnsureAppVisible();
             [panel orderFrontRegardless];
             checkAt = t + 0.12;
         } else {
@@ -853,6 +862,7 @@ static void historyResignKey(void) {
     [panel makeFirstResponder:nil];
     if ([panel isKeyWindow] || [panel isVisible]) {
         [panel orderOut:nil];
+        flowliteEnsureAppVisible();
         [panel orderFrontRegardless];
     }
 }
@@ -1491,6 +1501,7 @@ void flowlite_overlay_set_live_text(const char *committed, const char *tentative
             capGen++;
             applyTraits(capPanel);
             [capPanel setAlphaValue:0];
+            flowliteEnsureAppVisible();
             [capPanel orderFrontRegardless];
             [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
                 ctx.duration = CAP_FADE_IN;

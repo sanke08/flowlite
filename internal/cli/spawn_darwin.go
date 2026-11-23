@@ -94,8 +94,11 @@ func openDaemonCmd(wait bool) (*exec.Cmd, error) {
 		return nil, err
 	}
 	// -n: a fresh instance even while the old one is still shutting down
-	// (reload); -g: don't bring it forward; -j: launch it hidden.
-	args := []string{"-n", "-g", "-j"}
+	// (reload); -g: don't bring it forward. Not -j: that launches the app
+	// *hidden*, and a hidden app never draws its windows — the pill would be
+	// ordered front and stay invisible. LSUIElement already keeps it out of
+	// the Dock and the app switcher.
+	args := []string{"-n", "-g"}
 	if wait {
 		args = append(args, "-W")
 	}

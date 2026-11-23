@@ -3,6 +3,21 @@
 All notable changes to FlowLite. Versions follow [Semantic Versioning](https://semver.org):
 MAJOR for incompatible changes, MINOR for new behaviour, PATCH for fixes.
 
+## [Unreleased]
+
+### Fixed
+- **The one-line installer shows progress straight away.** It used to make a
+  separate HEAD request for the file size before drawing anything, with no
+  timeout, so a slow or stalled connection meant a silent wait. The size now
+  comes from the release data already fetched, the readout starts at once, and
+  a network that cannot reach GitHub fails within 15 seconds with a message.
+- **The pill was invisible when FlowLite ran in the background.** The hidden
+  FlowLite app was opened with `open -j` ("launch hidden"), and a hidden app
+  draws none of its windows, so dictation worked and pasted but no pill ever
+  appeared. The daemon is no longer launched hidden, and the pill unhides the
+  app before it is shown. Run `flowlite stop` then `flowlite start` once to
+  pick this up.
+
 ## [0.7.0] — 2026-11-22
 
 ### Added
